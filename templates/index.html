@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Терминал Наемников [ЗОНА]</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+    <div id="loading-screen" class="loading-screen">
+        <img src="{{ url_for('static', filename='images/KS_1.png') }}" alt="Логотип" class="loading-logo">
+        <div class="loading-text">ИНИЦИАЛИЗАЦИЯ СИСТЕМЫ...</div>
+        <div class="loading-bar-container">
+            <div id="initial-loading-bar" class="loading-bar"></div>
+        </div>
+    </div>
+
+    <div id="main-terminal-container" class="terminal-container hidden"> 
+        <h1>ТЕРМИНАЛ НАЕМНИКОВ [ЗОНА]</h1>
+        
+        <textarea id="terminal-output" readonly></textarea>
+        <input type="text" id="terminal-input" autofocus autocomplete="off" placeholder="$ ">
+
+        <svg style="position: absolute; width: 0; height: 0; overflow: hidden;">
+            <filter id="noiseFilter">
+                <feTurbulence 
+                    type="fractalNoise" 
+                    baseFrequency="0.65" 
+                    numOctaves="3" 
+                    stitchTiles="stitch" />
+                <feComposite operator="in" in2="SourceGraphic" result="monoNoise"/>
+                <feBlend in="SourceGraphic" in2="monoNoise" mode="multiply" />
+            </filter>
+        </svg>
+    </div>
+
+    <div class="ui-elements">
+        <div class="ui-indicator online" id="connection-status">СОЕДИНЕНИЕ: СТАБИЛЬНО</div>
+        <button class="ui-button" id="toggle-sound">ЗВУК: ВКЛ</button>
+        <button class="ui-button" id="reboot-system">ПЕРЕЗАГРУЗКА</button>
+    </div>
+
+    <div id="ui-bottom-panel" class="ui-bottom-panel hidden">
+        <div class="panel-title">СИСТЕМНЫЕ ДАННЫЕ</div>
+        <div class="stat-line">
+            <span class="stat-label">ВРЕМЯ СИСТЕМЫ:</span>
+            <span class="stat-value" id="system-time">--:--:--</span>
+        </div>
+        <div class="stat-line">
+            <span class="stat-label">ВРЕМЯ РАБОТЫ:</span>
+            <span class="stat-value" id="uptime">00:00:00</span>
+        </div>
+        <div class="stat-line">
+            <span class="stat-label">КАНАЛ СВЯЗИ:</span>
+            <span class="stat-value" id="channel-frequency">ALPHA-7 (142.7 МГц)</span> </div>
+        <div class="stat-line">
+            <span class="stat-label">СТАТУС КАНАЛА:</span>
+            <span class="stat-value" id="channel-status">ЧИСТО</span>
+        </div>
+        <div class="stat-line">
+            <span class="stat-label">ПИНГ:</span>
+            <span class="stat-value" id="network-ping">--мс</span>
+        </div>
+        <div class="progress-bar-container">
+            <div class="progress-bar" id="data-transfer-progress"></div>
+        </div>
+        <div class="stat-line">
+            <span class="stat-label">ЗАГРУЗКА ДАННЫХ:</span>
+            <span class="stat-value" id="data-transfer-percent">0%</span>
+        </div>
+    </div>
+
+    <div class="corner-deco top-left"></div>
+    <div class="corner-deco top-right"></div>
+    <div class="corner-deco bottom-left"></div>
+    <div class="corner-deco bottom-right"></div>
+
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

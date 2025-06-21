@@ -1,0 +1,21 @@
+{
+    "operative": [
+        "0b40f946",
+        "cf9fcc42",
+        "4d748bd9",
+        "b2b042cc"
+    ],
+    "commander": [
+        "163cd22c"
+    ],
+    "client": [
+        "07665810",
+        "d2a4920a",
+        "d7587888",
+        "c084e27a",
+        "4e73e3e6"
+    ],
+    "syndicate": [
+        "SYNDICATE_OVERRIDE_KEY"
+    ]
+}
