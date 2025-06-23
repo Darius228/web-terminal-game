@@ -156,15 +156,23 @@ def index():
     return render_template('index.html')
 
 @socketio.on('connect')
+
+@socketio.on('connect')
 def handle_connect():
+    # Устанавливаем сессию гостя, как и раньше
     session['role'] = 'guest'
     session['uid'] = None
     session['callsign'] = None
     session['squad'] = None
     active_users[request.sid] = {'uid': None, 'callsign': None, 'role': 'guest', 'squad': None}
     
-    emit('terminal_output', {'output': "Система инициализирована. Введите 'login <UID> <ключ_доступа>' или 'help'.\n"})
+    # УДАЛЕНО: больше не отправляем приветственное сообщение отсюда
+    # emit('terminal_output', {'output': "Система инициализирована. ..."})
+    
+    # Отправляем начальное состояние UI, это по-прежнему нужно
     emit('update_ui_state', {'role': 'guest', 'show_ui_panel': False, 'squad': None})
+    
+    # Логируем подключение, как и раньше
     log_terminal_event("connection", f"SID:{request.sid}", "Новое подключение.")
 
 @socketio.on('disconnect')

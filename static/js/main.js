@@ -106,8 +106,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
     mainTerminalContainer.classList.add('hidden');
     uiBottomPanel.classList.add('hidden'); 
     loadingScreen.classList.remove('hidden');
-    initialLoadingBar.style.width = '0%'; 
-    console.log("DOMContentLoaded: Скрыт mainTerminalContainer и uiBottomPanel, показан loadingScreen, полоса сброшена.");
+    initialLoadingBar.style.width = '0%';
 
     let progress = 0;
     const loadingInterval = setInterval(() => {
@@ -117,12 +116,22 @@ document.addEventListener('DOMContentLoaded', (event) => {
         
         if (progress >= 100) {
             clearInterval(loadingInterval);
-            console.log("Loading complete (100%). Clearing interval.");
+            console.log("Loading complete (100%).");
             setTimeout(() => { 
                 loadingScreen.classList.add('hidden'); 
                 mainTerminalContainer.classList.remove('hidden'); 
-                console.log("Loading screen hidden, Main terminal container shown.");
-                initializeTerminalDisplay(); 
+                
+                // РЕШАЕМ, ЧТО ПОКАЗАТЬ:
+                if (wasOutputLoaded) {
+                    // Если история загружена, просто ставим фокус
+                    console.log("Session restored. Focusing input.");
+                    terminalInput.focus();
+                } else {
+                    // Если истории нет (первый визит), показываем приветствие
+                    console.log("No previous session found. Initializing display.");
+                    initializeTerminalDisplay(); 
+                }
+
             }, 300); 
         }
     }, 80); 
@@ -458,6 +467,7 @@ function saveDataToLocalStorage() {
     }
 }
 
+// 1. Обновленная функция загрузки из localStorage
 function loadDataFromLocalStorage() {
     try {
         const savedHistory = JSON.parse(localStorage.getItem('stalker_terminal_commandHistory'));
@@ -468,11 +478,7 @@ function loadDataFromLocalStorage() {
             commandHistory = savedHistory;
             console.log("Loaded command history from localStorage.");
         }
-        if (typeof savedOutput === 'string') {
-            terminalOutput.value = savedOutput;
-            terminalOutput.scrollTop = terminalOutput.scrollHeight;
-            console.log("Loaded terminal output from localStorage.");
-        }
+        
         if (typeof savedSound === 'boolean') {
             soundEnabled = savedSound;
             if(toggleSoundButton) {
@@ -480,7 +486,17 @@ function loadDataFromLocalStorage() {
             }
             console.log("Loaded sound setting from localStorage:", soundEnabled);
         }
+
+        // Ключевое изменение: проверяем, есть ли сохраненный вывод
+        if (typeof savedOutput === 'string' && savedOutput.trim() !== '') {
+            terminalOutput.value = savedOutput;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            console.log("Loaded terminal output from localStorage.");
+            return true; // Сообщаем, что загрузка прошла успешно
+        }
+
     } catch (e) {
         console.warn("Failed to load data from localStorage:", e);
     }
+    return false; // Сообщаем, что загружать было нечего
 }
