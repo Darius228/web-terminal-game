@@ -1,0 +1,13 @@
+# .gitignore
+
+# Файлы окружения и секретов
+*.env
+.env
+google_credentials.json
+access_keys.json
+access_keys_generated.json
+
+# Логи и кэш Python
+*.log
+__pycache__/
+*.pyc

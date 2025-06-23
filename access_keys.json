@@ -1,19 +1,26 @@
 {
     "operative": [
-        "0b40f946",
-        "cf9fcc42",
-        "4d748bd9",
-        "b2b042cc"
+        "1063a759",
+        "0f6533b9",
+        "3d2ff19d",
+        "41e8f466",
+        "51e38904",
+        "69be7e9c",
+        "22dfa703",
+        "97d09e22",
+        "e778a708",
+        "59e030fe"
     ],
     "commander": [
-        "163cd22c"
+        "b02bda47",
+        "6bbefdaf"
     ],
     "client": [
-        "07665810",
-        "d2a4920a",
-        "d7587888",
-        "c084e27a",
-        "4e73e3e6"
+        "db7d262b",
+        "1f6a8831",
+        "88a048f5",
+        "be6f1d57",
+        "0b519006"
     ],
     "syndicate": [
         "SYNDICATE_OVERRIDE_KEY"

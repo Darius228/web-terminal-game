@@ -1,1 +1,2 @@
-web: gunicorn WebTerminal:app --worker-class eventlet -b 0.0.0.0:$PORT
+# Procfile
+web: gunicorn --worker-class eventlet -w 1 WebTerminal:app

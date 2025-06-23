@@ -14,14 +14,24 @@ const connectionStatusIndicator = document.getElementById('connection-status');
 const systemTimeElement = document.getElementById('system-time');
 const uptimeElement = document.getElementById('uptime');
 const channelFrequencyElement = document.getElementById('channel-frequency');
+const networkPingElement = document.getElementById('network-ping');
 
 const uiBottomPanel = document.getElementById('ui-bottom-panel'); 
 const loadingScreen = document.getElementById('loading-screen'); 
 const mainTerminalContainer = document.getElementById('main-terminal-container'); 
 const initialLoadingBar = document.getElementById('initial-loading-bar'); 
 
+// --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ЭЛЕМЕНТОВ ИНТЕРФЕЙСА СИНДИКАТА ---
+const alphaFreqLine = document.getElementById('alpha-freq-line');
+const betaFreqLine = document.getElementById('beta-freq-line');
+const alphaFrequencyElement = document.getElementById('alpha-frequency');
+const betaFrequencyElement = document.getElementById('beta-frequency');
+
 let soundEnabled = true; 
 let uptimeSeconds = 0;
+
+let currentPing = '--';
+let pingIntervalId = null;
 
 const socket = io();
 
@@ -53,7 +63,7 @@ function playSingleSound(audioElement) {
     audioElement.play().catch(e => console.log("Sound play error:", e));
 }
 
-// --- Объект плагинов команд ---
+// --- Объект плагинов команд (для команд, обрабатываемых на клиенте) ---
 const commandPlugins = {};
 
 // Функция регистрации команды
@@ -61,10 +71,12 @@ function registerCommand(name, handler) {
     commandPlugins[name.toLowerCase()] = handler;
 }
 
-// Пример плагина: команда 'echo'
-registerCommand('echo', function(args) {
-    const response = args.join(' ');
-    displayOutput(response + '\n', false, true);
+// Клиентская команда 'clear' (теперь обрабатывается на клиенте)
+registerCommand('clear', function() {
+    terminalOutput.value = '';
+    displayOutput(prompt, false, true);
+    playSingleSound(commandDoneSound);
+    console.log("Client-side terminal cleared.");
 });
 
 
@@ -72,7 +84,7 @@ function initializeTerminalDisplay() {
     console.log("initializeTerminalDisplay: Запуск вывода начального текста.");
     displayOutput("Инициализация Терминала...", true, true);
     displayOutput("Связь установлена.", true, true);
-    displayOutput("Доступ ограничен. Для получения доступа введите 'login <ключ>'", true, true);
+    displayOutput("Доступ ограничен. Для получения доступа введите 'login <UID> <ключ_доступа>'", true, true);
     displayOutput("Для списка доступных команд введите \"help\"", true, true);
     displayOutput(prompt, false, true); // Отображаем prompt
     terminalInput.focus(); 
@@ -118,6 +130,9 @@ document.addEventListener('DOMContentLoaded', (event) => {
     updateSystemTimeAndUptime();
     setInterval(updateSystemTimeAndUptime, 1000);
 
+    // Инициализация пинга
+    startPingMeasurement();
+
     if (toggleSoundButton) {
         toggleSoundButton.addEventListener('click', () => {
             soundEnabled = !soundEnabled;
@@ -141,7 +156,14 @@ document.addEventListener('DOMContentLoaded', (event) => {
             systemTimeElement.textContent = "--:--:--";
             uptimeElement.textContent = "00:00:00";
             if (channelFrequencyElement) channelFrequencyElement.textContent = "--:--"; 
+            if (networkPingElement) networkPingElement.textContent = "--мс"; // Сброс пинга при перезагрузке
             uptimeSeconds = 0;
+
+            // Очистка интервала пинга при перезагрузке
+            if (pingIntervalId) {
+                clearInterval(pingIntervalId);
+                pingIntervalId = null;
+            }
 
             if (uiBottomPanel) {
                 uiBottomPanel.classList.add('hidden');
@@ -172,6 +194,7 @@ document.addEventListener('DOMContentLoaded', (event) => {
                         connectionStatusIndicator.classList.add('online');
                         
                         initializeTerminalDisplay(); 
+                        startPingMeasurement(); // Перезапуск пинга после перезагрузки
                     }, 300); 
                 }
             }, 80);
@@ -231,7 +254,7 @@ socket.on('terminal_output', function(data) {
         terminalOutput.value = ''; 
         displayOutput(prompt, false, true); 
         playSingleSound(commandDoneSound);
-        console.log("Terminal cleared.");
+        console.log("Terminal cleared by server command (internal clear).");
         return;
     }
 
@@ -239,13 +262,14 @@ socket.on('terminal_output', function(data) {
     playSingleSound(commandDoneSound);
 });
 
+// --- ОБНОВЛЕННЫЙ ОБРАБОТЧИК ДЛЯ ОТОБРАЖЕНИЯ ДАННЫХ СИНДИКАТА ---
 socket.on('update_ui_state', function(data) {
     console.log("Socket: Received update_ui_state:", data);
     const role = data.role;
-    const channelFrequency = data.channel_frequency;
+    const showUiPanel = data.show_ui_panel;
 
     if (uiBottomPanel) {
-        if (['operative', 'commander', 'syndicate'].includes(role)) {
+        if (showUiPanel) {
             uiBottomPanel.classList.remove('hidden');
             console.log("UI Bottom Panel shown for role:", role);
         } else {
@@ -254,11 +278,54 @@ socket.on('update_ui_state', function(data) {
         }
     }
 
-    if (channelFrequencyElement && channelFrequency) {
-        channelFrequencyElement.textContent = channelFrequency;
-        console.log("Channel Frequency updated:", channelFrequency);
+    // Обновляем общую для всех частоту (личный канал)
+    if (channelFrequencyElement && data.channel_frequency) {
+        channelFrequencyElement.textContent = data.channel_frequency;
+    }
+
+    // Логика для отображения частот отрядов для Синдиката
+    if (role === 'syndicate' && data.squad_frequencies) {
+        if (alphaFreqLine && betaFreqLine && alphaFrequencyElement && betaFrequencyElement) {
+            alphaFrequencyElement.textContent = data.squad_frequencies.alpha || '--.-- МГц';
+            betaFrequencyElement.textContent = data.squad_frequencies.beta || '--.-- МГц';
+            alphaFreqLine.classList.remove('hidden');
+            betaFreqLine.classList.remove('hidden');
+            // Скрываем личный канал связи, т.к. у Синдиката его нет
+            if(channelFrequencyElement) channelFrequencyElement.parentElement.classList.add('hidden');
+        }
+    } else {
+        // Убеждаемся, что для других ролей эти строки скрыты, а личный канал показан
+        if (alphaFreqLine && betaFreqLine) {
+            alphaFreqLine.classList.add('hidden');
+            betaFreqLine.classList.add('hidden');
+        }
+        if(channelFrequencyElement) channelFrequencyElement.parentElement.classList.remove('hidden');
     }
 });
+
+// Обработка pong ответа для измерения пинга
+socket.on('pong_response', function() {
+    const endTime = Date.now();
+    const pingTime = endTime - window.pingStartTime;
+    currentPing = pingTime;
+    if (networkPingElement) {
+        networkPingElement.textContent = `${currentPing}мс`;
+    }
+    console.log(`Ping: ${pingTime}ms`);
+});
+
+// Функция для начала измерения пинга
+function startPingMeasurement() {
+    if (pingIntervalId) { // Если уже запущен, сначала очистить
+        clearInterval(pingIntervalId);
+    }
+    // Отправляем пинг каждые 3 секунды
+    pingIntervalId = setInterval(() => {
+        window.pingStartTime = Date.now();
+        socket.emit('ping_check');
+    }, 3000);
+    console.log("Started ping measurement.");
+}
 
 
 function processCommand() {
@@ -286,10 +353,10 @@ function processCommand() {
     const cmdName = parts[0].toLowerCase();
     const args = parts.slice(1);
 
-    if (commandPlugins[cmdName]) {
+    if (commandPlugins[cmdName]) { // Проверяем, есть ли команда в локальных плагинах
         commandPlugins[cmdName](args);
         terminalInput.value = ''; 
-    } else {
+    } else { // Если нет, отправляем на сервер
         setTimeout(() => {
             socket.emit('terminal_input', { command: fullCommand });
             terminalInput.value = ''; 
@@ -299,7 +366,7 @@ function processCommand() {
 }
 
 function displayOutput(text, addNewLine, isInstant = false) {
-    console.log(`displayOutput called: text="${text.substring(0, 30)}...", addNewLine=${addNewLine}, isInstant=${isInstant}, isTyping=${isTyping}`);
+    console.log(`displayOutput called: text="${text.substring(0, Math.min(text.length, 30))}"..., addNewLine=${addNewLine}, isInstant=${isInstant}, isTyping=${isTyping}`);
     
     if (isTyping && !isInstant) { 
         console.log("Skipping displayOutput: Still typing and not instant.");
@@ -308,7 +375,7 @@ function displayOutput(text, addNewLine, isInstant = false) {
 
     if (isInstant) {
         terminalOutput.value += text;
-        if (addNewLine) {
+        if (addNewLine && !text.endsWith('\n')) { // Добавляем новую строку, если ее нет
             terminalOutput.value += '\n'; 
         }
         terminalOutput.scrollTop = terminalOutput.scrollHeight; 
@@ -327,13 +394,15 @@ function displayOutput(text, addNewLine, isInstant = false) {
             terminalOutput.scrollTop = terminalOutput.scrollHeight; 
             setTimeout(typeChar, TYPING_SPEED);
         } else {
-            if (addNewLine) {
+            if (addNewLine && !text.endsWith('\n')) { // Добавляем новую строку, если ее нет
                 terminalOutput.value += '\n'; 
             }
             isTyping = false;
             console.log("Typing animation finished. Final output value length:", terminalOutput.value.length);
             
-            if (!text.endsWith(prompt + '\n') && !text.includes("Сеанс завершен") && !text.includes("Для повторного доступа")) {
+            // Проверка на то, нужно ли добавлять prompt
+            const lastLine = terminalOutput.value.split('\n').pop().trim();
+            if (!lastLine.startsWith(prompt.trim())) { // Если последняя строка не является prompt
                 displayOutput(prompt, false, true); 
             }
             
@@ -354,9 +423,16 @@ function displayOutput(text, addNewLine, isInstant = false) {
 
 function updateSystemTimeAndUptime() {
     const now = new Date();
-    const hours = String(now.getHours()).padStart(2, '0');
-    const minutes = String(now.getMinutes()).padStart(2, '0');
-    const seconds = String(now.getSeconds()).padStart(2, '0');
+    // Для московского времени (UTC+3)
+    const mskOffset = 3; // часа
+    const localTime = now.getTime();
+    const localOffset = now.getTimezoneOffset() * 60 * 1000; // в миллисекундах
+    const utc = localTime + localOffset;
+    const mskTime = new Date(utc + (3600000 * mskOffset));
+
+    const hours = String(mskTime.getHours()).padStart(2, '0');
+    const minutes = String(mskTime.getMinutes()).padStart(2, '0');
+    const seconds = String(mskTime.getSeconds()).padStart(2, '0');
     if (systemTimeElement) {
         systemTimeElement.textContent = `${hours}:${minutes}:${seconds}`;
     }
