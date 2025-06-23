@@ -145,8 +145,14 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_very_temporary_secret_key_for_dev_only')
 socketio = SocketIO(app)
 
-if not google_sheets_api.init_google_sheets():
-    print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать Google Таблицы. Логирование и основные функции не будут работать.")
+#if not google_sheets_api.init_google_sheets():#
+    #print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать Google Таблицы. Логирование и основные функции не будут работать.")#
+if __name__ == "__main__":
+    from time import sleep
+    print("🧪 Тестовая инициализация Google Sheets...")
+    success = init_google_sheets()
+    print("✅ Успешно" if success else "❌ Не удалось")
+    sleep(2)
 
 load_access_keys()
 load_data_from_sheets()
