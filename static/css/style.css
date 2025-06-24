@@ -23,11 +23,17 @@ body {
     letter-spacing: 0px;
     display: flex;
     justify-content: center;
-    align-items: center;
-    min-height: 100vh;
-    margin: 0;
-    overflow: hidden; /* Предотвращаем прокрутку */
-    user-select: none; /* Запрещаем выделение текста */
+    align-items: center; /* Центрируем содержимое по вертикали */
+    min-height: 100vh; /* Гарантируем, что body занимает всю высоту viewport */
+    margin: 0; /* Убираем стандартные отступы */
+
+    /* --- НОВЫЕ СВОЙСТВА ДЛЯ ФОНОВОЙ КАРТИНКИ --- */
+    background-image: url('../images/Sunset in the city of labor.jpg'); /* Укажи имя своей картинки */
+    background-size: cover; /* Растягивает изображение, чтобы оно покрывало весь элемент, сохраняя пропорции */
+    background-position: center center; /* Центрирует изображение */
+    background-repeat: no-repeat; /* Запрещает повторение изображения */
+    background-attachment: fixed; /* Фиксирует изображение на месте при прокрутке (если она появится) */
+    /* --- КОНЕЦ НОВЫХ СВОЙСТВ --- */
 }
 
 /* Основной контейнер терминала */
