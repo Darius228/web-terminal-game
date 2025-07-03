@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Терминал Наемников [ЗОНА]</title>
+    <title>Терминал [ЗОНА]</title>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
 </head>
 <body>
@@ -15,23 +15,12 @@
         </div>
     </div>
 
-    <div id="main-terminal-container" class="terminal-container hidden"> 
-        <h1>ТЕРМИНАЛ НАЕМНИКОВ [ЗОНА]</h1>
-        
-        <textarea id="terminal-output" readonly></textarea>
-        <input type="text" id="terminal-input" autofocus autocomplete="off" placeholder="$ ">
-
-        <svg style="position: absolute; width: 0; height: 0; overflow: hidden;">
-            <filter id="noiseFilter">
-                <feTurbulence 
-                    type="fractalNoise" 
-                    baseFrequency="0.65" 
-                    numOctaves="3" 
-                    stitchTiles="stitch" />
-                <feComposite operator="in" in2="SourceGraphic" result="monoNoise"/>
-                <feBlend in="SourceGraphic" in2="monoNoise" mode="multiply" />
-            </filter>
-        </svg>
+    <div id="terminal-frame" class="terminal-frame hidden">
+        <div id="main-terminal-container" class="terminal-container">
+            <h1>ТЕРМИНАЛ [ЗОНА]</h1>
+            <textarea id="terminal-output" readonly></textarea>
+            <input type="text" id="terminal-input" autofocus autocomplete="off" placeholder="$ ">
+        </div>
     </div>
 
     <div class="ui-elements">
@@ -52,10 +41,7 @@
         </div>
         <div class="stat-line">
             <span class="stat-label">КАНАЛ СВЯЗИ:</span>
-            <span class="stat-value" id="channel-frequency">ALPHA-7 (142.7 МГц)</span> </div>
-        <div class="stat-line">
-            <span class="stat-label">СТАТУС КАНАЛА:</span>
-            <span class="stat-value" id="channel-status">ЧИСТО</span>
+            <span class="stat-value" id="channel-frequency">--:--</span>
         </div>
         <div class="stat-line">
             <span class="stat-label">ПИНГ:</span>
@@ -70,11 +56,6 @@
             <span class="stat-value" id="beta-frequency">--.-- МГц</span>
         </div>
     </div>
-
-    <div class="corner-deco top-left"></div>
-    <div class="corner-deco top-right"></div>
-    <div class="corner-deco bottom-left"></div>
-    <div class="corner-deco bottom-right"></div>
 
     <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
