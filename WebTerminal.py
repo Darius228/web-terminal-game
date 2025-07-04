@@ -29,7 +29,7 @@ ROLE_PERMISSIONS = {
                   "contract_details", "squad_status"],
     "commander": ["help", "ping", "sendmsg", "contracts", "assign_contract", "view_users_squad", 
                   "setchannel", "exit", "clear", "contract_details", "squad_status", "update_contract"],
-    "client": ["help", "ping", "sendmsg", "create_request", "view_my_requests", "exit", "clear"],
+    "client": ["help", "ping", "create_request", "view_my_requests", "exit", "clear"],
     "syndicate": ["help", "ping", "sendmsg", "resetkeys", "viewkeys", "register_user",
                   "unregister_user", "view_users", "viewrequests", "acceptrequest",
                   "declinerequest", "contracts", "exit", "clear"]
@@ -478,7 +478,7 @@ def handle_terminal_input(data):
         output += "---------------------------------------\n"
     
     elif base_command == "view_users_squad" and current_role == "commander":
-        output = f"--- 👥 ОПЕРАТИВНИКИ В ОТЯДЕ {session['squad'].upper()} ---\n"
+        output = f"--- 👥 ОПЕРАТИВНИКИ В ОТРЯДЕ {session['squad'].upper()} ---\n"
         load_data_from_sheets()
         found_operatives = False
         for uid, user_data in REGISTERED_USERS.items():
@@ -554,7 +554,6 @@ def handle_terminal_input(data):
         if not found_orders: output += "  У вас нет текущих назначений.\n"
         output += "---------------------------\n"
 
-    # --- НОВАЯ КОМАНДА: contract_details ---
     elif base_command == "contract_details" and current_role in ["operative", "commander"]:
         if not args:
             output = "ℹ️ Использование: contract_details <ID_контракта>\n"
@@ -580,7 +579,7 @@ def handle_terminal_input(data):
                     output += f"Назначен: {assigned_to}\n"
                     output += "---------------------------------\n"
 
-    # --- НОВАЯ КОМАНДА: update_contract ---
+    # --- ИЗМЕНЕНА КОМАНДА: update_contract (добавлена проверка на принадлежность к отряду) ---
     elif base_command == "update_contract" and current_role == "commander":
         update_parts = args.split(" ")
         if len(update_parts) < 2:
@@ -601,6 +600,25 @@ def handle_terminal_input(data):
             if not target_contract:
                 output = f"❌ Ошибка: Контракт с ID '{contract_id}' не найден.\n"
             else:
+                # --- НАЧАЛО НОВОЙ ЛОГИКИ ПРОВЕРКИ ---
+                operative_callsign = target_contract.get('Назначено')
+
+                if not operative_callsign or operative_callsign == 'None':
+                    output = f"❌ Ошибка: Контракт ID:{contract_id} никому не назначен. Вы не можете изменить его статус.\n"; emit('terminal_output', {'output': output}); return
+
+                # Ищем оперативника в списке пользователей, чтобы проверить его отряд
+                assigned_operative = next((user for user in REGISTERED_USERS.values() if user.get('Позывной') == operative_callsign), None)
+
+                if not assigned_operative:
+                    output = f"❌ КРИТИЧЕСКАЯ ОШИБКА: Не найдены данные по оперативнику '{operative_callsign}'. Сообщите Синдикату.\n"; emit('terminal_output', {'output': output}); return
+
+                operative_squad = assigned_operative.get('Отряд')
+                commander_squad = session.get('squad')
+
+                if operative_squad != commander_squad:
+                    output = f"❌ Ошибка доступа: Вы не можете управлять контрактом, который назначен бойцу не из вашего отряда ({commander_squad.upper()}).\n"; emit('terminal_output', {'output': output}); return
+                # --- КОНЕЦ НОВОЙ ЛОГИКИ ПРОВЕРКИ ---
+
                 update_data = {}
                 log_message = ""
                 success_message = ""
@@ -611,8 +629,6 @@ def handle_terminal_input(data):
                     success_message = f"✅ Статус контракта ID:{contract_id} изменен на 'Провален'.\n"
                 
                 elif new_status == 'reset':
-                    if target_contract.get('Назначено', 'None') == 'None':
-                         output = f"❌ Ошибка: Контракт ID:{contract_id} и так никому не назначен.\n"; emit('terminal_output', {'output': output}); return
                     update_data = {'Статус': 'Активен', 'Назначено': 'None'}
                     log_message = f"Сбросил назначение для контракта ID:{contract_id}."
                     success_message = f"✅ Назначение для контракта ID:{contract_id} сброшено. Статус изменен на 'Активен'.\n"
@@ -625,7 +641,6 @@ def handle_terminal_input(data):
                 else:
                     output = f"❌ Ошибка: Не удалось обновить контракт ID:{contract_id} в Google Таблицах.\n"
 
-    # --- НОВАЯ КОМАНДА: squad_status ---
     elif base_command == "squad_status" and current_role in ["operative", "commander"]:
         user_squad = session.get('squad')
         if not user_squad or user_squad.lower() == 'none':
