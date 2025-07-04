@@ -22,15 +22,19 @@ LOG_SHEET_NAME = "Логи"
 
 # --- Глобальные переменные и константы ---
 # ... (остальные переменные остаются без изменений)
+# --- ИЗМЕНЕНО: Добавлены новые команды в разрешения ролей ---
 ROLE_PERMISSIONS = {
     "guest": ["help", "login", "clear", "ping"],
-    "operative": ["help", "ping", "sendmsg", "contracts", "view_orders", "exit", "clear"],
-    "commander": ["help", "ping", "sendmsg", "contracts", "assign_contract", "view_users_squad", "setchannel", "exit", "clear"],
+    "operative": ["help", "ping", "sendmsg", "contracts", "view_orders", "exit", "clear", 
+                  "contract_details", "squad_status"],
+    "commander": ["help", "ping", "sendmsg", "contracts", "assign_contract", "view_users_squad", 
+                  "setchannel", "exit", "clear", "contract_details", "squad_status", "update_contract"],
     "client": ["help", "ping", "sendmsg", "create_request", "view_my_requests", "exit", "clear"],
     "syndicate": ["help", "ping", "sendmsg", "resetkeys", "viewkeys", "register_user",
                   "unregister_user", "view_users", "viewrequests", "acceptrequest",
                   "declinerequest", "contracts", "exit", "clear"]
 }
+# --- ИЗМЕНЕНО: Добавлены описания для новых команд ---
 COMMAND_DESCRIPTIONS = {
     "help": "Отображает список доступных команд с их описанием.",
     "login": "Выполняет вход в систему. Использование: login <UID> <ключ_доступа>",
@@ -52,7 +56,10 @@ COMMAND_DESCRIPTIONS = {
     "viewrequests": "Просматривает ожидающие запросы клиентов (только для Синдиката).",
     "acceptrequest": "Принимает запрос клиента и создает контракт. Использование: acceptrequest <ID_запроса> <название_контракта> <описание_контракта> <награда>",
     "declinerequest": "Отклоняет запрос клиента. Использование: declinerequest <ID_запроса>",
-    "exit": "Выходит из текущей сессии, возвращаясь к роли гостя."
+    "exit": "Выходит из текущей сессии, возвращаясь к роли гостя.",
+    "contract_details": "Показывает детальную информацию о контракте. Использование: contract_details <ID_контракта>",
+    "update_contract": "Обновляет статус контракта. Использование: update_contract <ID_контракта> <fail|reset>",
+    "squad_status": "Показывает онлайн-статус бойцов вашего отряда."
 }
 ACCESS_KEYS = {}
 KEY_TO_ROLE = {}
@@ -154,8 +161,6 @@ load_data_from_sheets()
 @app.route('/')
 def index():
     return render_template('index.html')
-
-@socketio.on('connect')
 
 @socketio.on('connect')
 def handle_connect():
@@ -286,8 +291,8 @@ def handle_terminal_input(data):
     elif base_command == "ping":
         output = "📡 Пинг: 42мс (стабильно)\n"
     elif base_command == "sendmsg":
-        if current_role not in ["operative", "commander", "syndicate"]:
-            output = "❌ Ошибка: Команда 'sendmsg' доступна только для Оперативников, Командиров и Синдиката.\n"
+        if current_role not in ["operative", "commander", "syndicate", "client"]:
+            output = "❌ Ошибка: Команда 'sendmsg' доступна только для авторизованных пользователей.\n"
         elif not args:
             output = "ℹ️ Использование: sendmsg <сообщение> ИЛИ sendmsg <UID_получателя> <сообщение>\n"
         else:
@@ -370,8 +375,6 @@ def handle_terminal_input(data):
                     for key in keys_list:
                         KEY_TO_ROLE[key] = role
                 
-                # В продакшене эта логика должна обновлять переменную окружения, что сложно.
-                # Поэтому мы просто показываем новые ключи, а админ должен их вручную обновить.
                 output = f"--- 🔑 Сгенерированы новые ключи для роли '{role_to_reset.upper()}'. ---\n"
                 output += "ВНИМАНИЕ: Для применения этих ключей обновите переменную окружения 'ACCESS_KEYS_JSON' и перезапустите приложение.\n"
                 output += f"{role_to_reset.upper()}: {', '.join(new_keys_for_role)}\n"
@@ -488,18 +491,20 @@ def handle_terminal_input(data):
 
     elif base_command == "contracts":
         load_data_from_sheets() 
-        if CONTRACTS:
-            output = "--- 📋 ДОСТУПНЫЕ КОНТРАКТЫ ---\n"
-            for contract in CONTRACTS:
-                if contract.get('Статус', 'unknown').lower() in ["active", "активен"]: 
-                    status_display = "АКТИВЕН"
-                    if contract.get('Назначено') and contract['Назначено'] != "None":
-                        status_display += f" (Назначен: {contract['Назначено']})"
-                    output += (f"  ID: {contract.get('ID', 'N/A')}, Название: {contract.get('Название', 'N/A')}, "
-                               f"Награда: {contract.get('Награда', 'N/A')}, Статус: {status_display}\n")
-            output += "---------------------------\n"
-        else:
+        output = "--- 📋 ДОСТУПНЫЕ КОНТРАКТЫ ---\n"
+        found_contracts = False
+        for contract in CONTRACTS:
+            status = contract.get('Статус', 'неизвестен').strip().lower()
+            if status not in ["провален", "выполнен", "failed", "completed"]:
+                status_display = contract.get('Статус', 'N/A')
+                if contract.get('Назначено') and str(contract.get('Назначено')) != "None":
+                    status_display += f" (Назначен: {contract.get('Назначено')})"
+                output += (f"  ID: {contract.get('ID', 'N/A')}, Название: {contract.get('Название', 'N/A')}, "
+                            f"Статус: {status_display}\n")
+                found_contracts = True
+        if not found_contracts:
             output = "ℹ️ В данный момент активных контрактов нет.\n"
+        output += "---------------------------\n"
     
     elif base_command == "assign_contract" and current_role == "commander":
         assign_parts = args.split(" ")
@@ -543,11 +548,112 @@ def handle_terminal_input(data):
         for contract in CONTRACTS:
             if contract.get('Назначено') == session['callsign']:
                 output += (f"  ID: {contract.get('ID', 'N/A')}, Название: {contract.get('Название', 'N/A')},\n"
-                           f"  Описание: {contract.get('Описание', 'N/A')},\n"
-                           f"  Награда: {contract.get('Награда', 'N/A')}, Статус: {contract.get('Статус', 'N/A')}\n")
+                           f"  Статус: {contract.get('Статус', 'N/A')}\n"
+                           f"  > Используйте 'contract_details {contract.get('ID')}' для подробностей.\n\n")
                 found_orders = True
         if not found_orders: output += "  У вас нет текущих назначений.\n"
         output += "---------------------------\n"
+
+    # --- НОВАЯ КОМАНДА: contract_details ---
+    elif base_command == "contract_details" and current_role in ["operative", "commander"]:
+        if not args:
+            output = "ℹ️ Использование: contract_details <ID_контракта>\n"
+        else:
+            try:
+                contract_id = int(args.strip())
+            except ValueError:
+                output = "❌ Ошибка: ID контракта должен быть числом.\n"
+            else:
+                load_data_from_sheets()
+                target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
+                if not target_contract:
+                    output = f"❌ Ошибка: Контракт с ID '{contract_id}' не найден.\n"
+                else:
+                    output = f"--- 📜 ДЕТАЛИ КОНТРАКТА ID: {contract_id} ---\n"
+                    output += f"Название: {target_contract.get('Название', 'Нет данных')}\n"
+                    output += f"Описание: {target_contract.get('Описание', 'Нет данных')}\n"
+                    output += f"Награда: {target_contract.get('Награда', 'Нет данных')}\n"
+                    output += f"Статус: {target_contract.get('Статус', 'Нет данных')}\n"
+                    assigned_to = target_contract.get('Назначено', 'None')
+                    if assigned_to == 'None' or not assigned_to:
+                        assigned_to = "Никому не назначен"
+                    output += f"Назначен: {assigned_to}\n"
+                    output += "---------------------------------\n"
+
+    # --- НОВАЯ КОМАНДА: update_contract ---
+    elif base_command == "update_contract" and current_role == "commander":
+        update_parts = args.split(" ")
+        if len(update_parts) < 2:
+            output = "ℹ️ Использование: update_contract <ID_контракта> <fail|reset>\n"
+        else:
+            try:
+                contract_id = int(update_parts[0])
+            except ValueError:
+                output = "❌ Ошибка: ID контракта должен быть числом.\n"; emit('terminal_output', {'output': output}); return
+            
+            new_status = update_parts[1].lower()
+            if new_status not in ['fail', 'reset']:
+                output = "❌ Ошибка: Неверный статус. Используйте 'fail' (провален) или 'reset' (сбросить назначение).\n"; emit('terminal_output', {'output': output}); return
+
+            load_data_from_sheets()
+            target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
+
+            if not target_contract:
+                output = f"❌ Ошибка: Контракт с ID '{contract_id}' не найден.\n"
+            else:
+                update_data = {}
+                log_message = ""
+                success_message = ""
+                
+                if new_status == 'fail':
+                    update_data = {'Статус': 'Провален'}
+                    log_message = f"Установил статус 'Провален' для контракта ID:{contract_id}."
+                    success_message = f"✅ Статус контракта ID:{contract_id} изменен на 'Провален'.\n"
+                
+                elif new_status == 'reset':
+                    if target_contract.get('Назначено', 'None') == 'None':
+                         output = f"❌ Ошибка: Контракт ID:{contract_id} и так никому не назначен.\n"; emit('terminal_output', {'output': output}); return
+                    update_data = {'Статус': 'Активен', 'Назначено': 'None'}
+                    log_message = f"Сбросил назначение для контракта ID:{contract_id}."
+                    success_message = f"✅ Назначение для контракта ID:{contract_id} сброшено. Статус изменен на 'Активен'.\n"
+
+                update_success = google_sheets_api.update_row_by_key('Контракты', 'ID', contract_id, update_data)
+                if update_success:
+                    target_contract.update(update_data)
+                    output = success_message
+                    log_terminal_event("commander_action", user_info, log_message)
+                else:
+                    output = f"❌ Ошибка: Не удалось обновить контракт ID:{contract_id} в Google Таблицах.\n"
+
+    # --- НОВАЯ КОМАНДА: squad_status ---
+    elif base_command == "squad_status" and current_role in ["operative", "commander"]:
+        user_squad = session.get('squad')
+        if not user_squad or user_squad.lower() == 'none':
+            output = "❌ Ошибка: Вы не приписаны к отряду.\n"
+        else:
+            output = f"--- 📡 СТАТУС ОТРЯДА {user_squad.upper()} ---\n"
+            load_data_from_sheets()
+            
+            online_uids = {user['uid'] for user in active_users.values() if user['uid']}
+            squad_members_found = False
+
+            # Сначала ищем командира отряда
+            for uid, user_data in REGISTERED_USERS.items():
+                if user_data.get('Отряд') == user_squad and user_data.get('Роль') == 'commander':
+                    status = "✅ ONLINE" if uid in online_uids else "❌ OFFLINE"
+                    output += f"  - {user_data.get('Позывной', 'N/A')} (Командир) - {status}\n"
+                    squad_members_found = True
+            
+            # Затем ищем оперативников
+            for uid, user_data in REGISTERED_USERS.items():
+                if user_data.get('Отряд') == user_squad and user_data.get('Роль') == 'operative':
+                    status = "✅ ONLINE" if uid in online_uids else "❌ OFFLINE"
+                    output += f"  - {user_data.get('Позывной', 'N/A')} (Оперативник) - {status}\n"
+                    squad_members_found = True
+            
+            if not squad_members_found:
+                output += "  В вашем отряде нет зарегистрированных бойцов.\n"
+            output += "----------------------------------\n"
 
     elif base_command == "create_request" and current_role == "client":
         request_text = args.strip()
@@ -610,10 +716,10 @@ def handle_terminal_input(data):
                 if google_sheets_api.update_row_by_key('Запросы Клиентов', 'ID Запроса', request_id, {'Статус': 'Принят'}):
                     valid_c_ids = [c['ID'] for c in CONTRACTS if isinstance(c.get('ID'), int)]
                     next_contract_id = max(valid_c_ids) + 1 if valid_c_ids else 1
-                    contract_data_row = [next_contract_id, contract_title, contract_description, contract_reward, 'active', 'None']
+                    contract_data_row = [next_contract_id, contract_title, contract_description, contract_reward, 'Активен', 'None']
                     if google_sheets_api.append_row('Контракты', contract_data_row):
                         target_request['Статус'] = 'Принят'
-                        CONTRACTS.append({"ID": next_contract_id, "Название": contract_title, "Описание": contract_description, "Награда": contract_reward, "Статус": "active", "Назначено": "None"})
+                        CONTRACTS.append({"ID": next_contract_id, "Название": contract_title, "Описание": contract_description, "Награда": contract_reward, "Статус": "Активен", "Назначено": "None"})
                         output = (f"✅ Запрос ID:{request_id} принят. Создан контракт (ID: {next_contract_id}) '{contract_title}'.\n")
                         log_terminal_event("syndicate_action", user_info, f"Принят запрос ID:{request_id}, создан контракт ID:{next_contract_id}.")
                         client_sid = next((sid for sid, data in active_users.items() if data.get('uid') == target_request.get('UID Клиента')), None)
