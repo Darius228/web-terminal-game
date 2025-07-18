@@ -100,12 +100,45 @@ load_data_from_sheets()
 def index():
     return render_template('index.html')
 
+# WebTerminal.py
+
 @socketio.on('connect')
 def handle_connect():
-    session.setdefault('role', 'guest')
-    active_users[request.sid] = {'uid': session.get('uid'), 'callsign': session.get('callsign'), 'role': session.get('role'), 'squad': session.get('squad')}
-    emit('update_ui_state', {'role': session.get('role'), 'show_ui_panel': session.get('role') != 'guest', 'squad': session.get('squad'), 'callsign': session.get('callsign'), 'channel_frequency': SQUAD_FREQUENCIES.get(session.get('squad'), '--:--')})
-    log_terminal_event("connection", f"SID:{request.sid}", "Новое подключение.")
+    # Проверяем, есть ли у пользователя уже установленная роль и UID в сессии
+    if 'uid' in session and 'role' in session and session['role'] != 'guest':
+        # Если да - это переподключение существующего пользователя. Восстанавливаем его.
+        current_uid = session['uid']
+        current_role = session['role']
+        current_callsign = session.get('callsign', 'N/A')
+        current_squad = session.get('squad')
+
+        # Восстанавливаем пользователя в нужных комнатах (для отрядов и синдиката)
+        if current_role in ["operative", "commander"] and current_squad and current_squad.lower() != 'none':
+            join_room(current_squad)
+        if current_role == "syndicate":
+            join_room("syndicate_room")
+
+        # Обновляем информацию об активном пользователе
+        active_users[request.sid] = {'uid': current_uid, 'callsign': current_callsign, 'role': current_role, 'squad': current_squad}
+        
+        # Логируем событие как восстановление сессии
+        log_terminal_event("reconnection", f"UID:{current_uid}, Callsign:{current_callsign}", "Сессия пользователя восстановлена после переподключения.")
+
+        # Отправляем на клиент актуальное состояние UI
+        ui_data = {'role': current_role, 'callsign': current_callsign, 'squad': current_squad, 'show_ui_panel': True}
+        if current_role == 'syndicate':
+            ui_data['squad_frequencies'] = SQUAD_FREQUENCIES
+            ui_data['channel_frequency'] = "Н/Д"
+        else:
+            ui_data['channel_frequency'] = SQUAD_FREQUENCIES.get(current_squad, '--:--')
+        emit('update_ui_state', ui_data)
+        
+    else:
+        # Если в сессии нет данных - это действительно новый гость
+        session.setdefault('role', 'guest')
+        active_users[request.sid] = {'uid': None, 'callsign': 'Guest', 'role': 'guest', 'squad': None}
+        emit('update_ui_state', {'role': 'guest', 'show_ui_panel': False})
+        log_terminal_event("connection", f"SID:{request.sid}", "Новое гостевое подключение.")
 
 @socketio.on('disconnect')
 def handle_disconnect():
