@@ -1,13 +1,12 @@
+// main.js
+
 const terminalOutput = document.getElementById('terminal-output');
 const terminalInput = document.getElementById('terminal-input');
-const prompt = '$ '; 
-
-const TYPING_SPEED = 10; 
+const prompt = '$ ';
+const TYPING_SPEED = 10;
 let isTyping = false;
-
 let commandHistory = [];
-let historyIndex = -1; 
-
+let historyIndex = -1;
 const toggleSoundButton = document.getElementById('toggle-sound');
 const rebootSystemButton = document.getElementById('reboot-system');
 const connectionStatusIndicator = document.getElementById('connection-status');
@@ -15,96 +14,83 @@ const systemTimeElement = document.getElementById('system-time');
 const uptimeElement = document.getElementById('uptime');
 const channelFrequencyElement = document.getElementById('channel-frequency');
 const networkPingElement = document.getElementById('network-ping');
-
-const uiBottomPanel = document.getElementById('ui-bottom-panel'); 
-const loadingScreen = document.getElementById('loading-screen'); 
-const mainTerminalContainer = document.getElementById('main-terminal-container'); 
-const initialLoadingBar = document.getElementById('initial-loading-bar'); 
-
-// --- НОВЫЕ ПЕРЕМЕННЫЕ ДЛЯ ЭЛЕМЕНТОВ ИНТЕРФЕЙСА СИНДИКАТА ---
+const uiBottomPanel = document.getElementById('ui-bottom-panel');
+const loadingScreen = document.getElementById('loading-screen');
+const mainTerminalContainer = document.getElementById('main-terminal-container');
+const initialLoadingBar = document.getElementById('initial-loading-bar');
 const alphaFreqLine = document.getElementById('alpha-freq-line');
 const betaFreqLine = document.getElementById('beta-freq-line');
 const alphaFrequencyElement = document.getElementById('alpha-frequency');
 const betaFrequencyElement = document.getElementById('beta-frequency');
-
-let soundEnabled = true; 
+let soundEnabled = true;
 let uptimeSeconds = 0;
-
 let currentPing = '--';
 let pingIntervalId = null;
-
 const socket = io();
-
-// --- Звуковые эффекты (для нажатий клавиш и команд) ---
-const keyPressSounds = [
-    new Audio('/static/audio/key_press_1.mp3'),
-    new Audio('/static/audio/key_press_2.mp3'),
-    new Audio('/static/audio/key_press_3.mp3')
-];
-const enterSounds = [
-    new Audio('/static/audio/enter_1.mp3'),
-    new Audio('/static/audio/enter_2.mp3'),
-    new Audio('/static/audio/enter_3.mp3'),
-];
+const keyPressSounds = [new Audio('/static/audio/key_press_1.mp3'), new Audio('/static/audio/key_press_2.mp3'), new Audio('/static/audio/key_press_3.mp3')];
+const enterSounds = [new Audio('/static/audio/enter_1.mp3'), new Audio('/static/audio/enter_2.mp3'), new Audio('/static/audio/enter_3.mp3'), ];
 const commandDoneSound = new Audio('/static/audio/command_done.mp3');
+const commandPlugins = {};
 
 function playRandomSound(audioArray) {
     if (!soundEnabled || audioArray.length === 0) return;
     const sound = audioArray[Math.floor(Math.random() * audioArray.length)];
     sound.currentTime = 0;
     sound.volume = 0.6;
-    sound.play().catch(e => console.log("Sound play error:", e));
+    sound.play().catch(e => {});
 }
 
 function playSingleSound(audioElement) {
     if (!soundEnabled || !audioElement) return;
     audioElement.currentTime = 0;
     audioElement.volume = 0.7;
-    audioElement.play().catch(e => console.log("Sound play error:", e));
+    audioElement.play().catch(e => {});
 }
 
-// --- Объект плагинов команд (для команд, обрабатываемых на клиенте) ---
-const commandPlugins = {};
-
-// Функция регистрации команды
 function registerCommand(name, handler) {
     commandPlugins[name.toLowerCase()] = handler;
 }
 
-// Клиентская команда 'clear' (теперь обрабатывается на клиенте)
 registerCommand('clear', function() {
     terminalOutput.value = '';
     displayOutput(prompt, false, true);
     playSingleSound(commandDoneSound);
-    console.log("Client-side terminal cleared.");
 });
 
-
 function initializeTerminalDisplay() {
-    console.log("initializeTerminalDisplay: Запуск вывода начального текста.");
-    displayOutput("Инициализация Терминала...", true, true);
-    displayOutput("Связь установлена.", true, true);
-    displayOutput("Доступ ограничен. Для получения доступа введите 'login <UID> <ключ_доступа>'", true, true);
-    displayOutput("Для списка доступных команд введите \"help\"", true, true);
-    displayOutput(prompt, false, true); // Отображаем prompt
-    terminalInput.focus(); 
-    console.log("initializeTerminalDisplay: Начальный текст выведен. Фокус на поле ввода.");
+    displayOutput("Инициализация Терминала...\nСвязь установлена.\nДоступ ограничен. Введите 'login <UID> <ключ>'\nДля списка команд введите 'help'\n" + prompt, false, true);
+    terminalInput.focus();
 }
 
+function loadDataFromLocalStorage() {
+    try {
+        const savedHistory = JSON.parse(localStorage.getItem('stalker_terminal_commandHistory'));
+        const savedOutput = localStorage.getItem('stalker_terminal_terminalOutput');
+        const savedSound = JSON.parse(localStorage.getItem('stalker_terminal_soundEnabled'));
+        if (Array.isArray(savedHistory)) {
+            commandHistory = savedHistory;
+        }
+        if (typeof savedSound === 'boolean') {
+            soundEnabled = savedSound;
+            if (toggleSoundButton) {
+                toggleSoundButton.textContent = `ЗВУК: ${soundEnabled ? 'ВКЛ' : 'ВЫКЛ'}`;
+            }
+        }
+        if (typeof savedOutput === 'string' && savedOutput.trim() !== '') {
+            terminalOutput.value = savedOutput;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
 
 document.addEventListener('DOMContentLoaded', (event) => {
-    console.log("DOMContentLoaded: DOM полностью загружен.");
-    
-    if (!loadingScreen || !mainTerminalContainer || !initialLoadingBar || !uiBottomPanel) {
-        console.error("DOMContentLoaded: Один или несколько критических элементов UI отсутствуют!");
-        return; 
-    }
-
-    // Восстановление данных из localStorage
-    loadDataFromLocalStorage();
+    let wasOutputLoaded = false;
+    wasOutputLoaded = loadDataFromLocalStorage();
 
     mainTerminalContainer.classList.add('hidden');
-    uiBottomPanel.classList.add('hidden'); 
+    uiBottomPanel.classList.add('hidden');
     loadingScreen.classList.remove('hidden');
     initialLoadingBar.style.width = '0%';
 
@@ -113,33 +99,22 @@ document.addEventListener('DOMContentLoaded', (event) => {
         progress += 10;
         if (progress > 100) progress = 100;
         initialLoadingBar.style.width = `${progress}%`;
-        
         if (progress >= 100) {
             clearInterval(loadingInterval);
-            console.log("Loading complete (100%).");
-            setTimeout(() => { 
-                loadingScreen.classList.add('hidden'); 
-                mainTerminalContainer.classList.remove('hidden'); 
-                
-                // РЕШАЕМ, ЧТО ПОКАЗАТЬ:
+            setTimeout(() => {
+                loadingScreen.classList.add('hidden');
+                mainTerminalContainer.classList.remove('hidden');
                 if (wasOutputLoaded) {
-                    // Если история загружена, просто ставим фокус
-                    console.log("Session restored. Focusing input.");
                     terminalInput.focus();
                 } else {
-                    // Если истории нет (первый визит), показываем приветствие
-                    console.log("No previous session found. Initializing display.");
-                    initializeTerminalDisplay(); 
+                    initializeTerminalDisplay();
                 }
-
-            }, 300); 
+            }, 300);
         }
-    }, 80); 
+    }, 80);
 
     updateSystemTimeAndUptime();
     setInterval(updateSystemTimeAndUptime, 1000);
-
-    // Инициализация пинга
     startPingMeasurement();
 
     if (toggleSoundButton) {
@@ -147,356 +122,167 @@ document.addEventListener('DOMContentLoaded', (event) => {
             soundEnabled = !soundEnabled;
             toggleSoundButton.textContent = `ЗВУК: ${soundEnabled ? 'ВКЛ' : 'ВЫКЛ'}`;
             saveDataToLocalStorage();
-            console.log("Sound toggled:", soundEnabled ? 'ON' : 'OFF');
         });
     }
 
     if (rebootSystemButton) {
         rebootSystemButton.addEventListener('click', () => {
-            console.log("Reboot system button clicked.");
-            terminalOutput.value = ''; 
-            terminalInput.value = '';
-            terminalInput.disabled = true; 
-
-            connectionStatusIndicator.textContent = "СОЕДИНЕНИЕ: ПЕРЕЗАГРУЗКА";
-            connectionStatusIndicator.classList.remove('online', 'offline', 'warning');
-            connectionStatusIndicator.classList.add('warning'); 
-            
-            systemTimeElement.textContent = "--:--:--";
-            uptimeElement.textContent = "00:00:00";
-            if (channelFrequencyElement) channelFrequencyElement.textContent = "--:--"; 
-            if (networkPingElement) networkPingElement.textContent = "--мс"; // Сброс пинга при перезагрузке
-            uptimeSeconds = 0;
-
-            // Очистка интервала пинга при перезагрузке
-            if (pingIntervalId) {
-                clearInterval(pingIntervalId);
-                pingIntervalId = null;
-            }
-
-            if (uiBottomPanel) {
-                uiBottomPanel.classList.add('hidden');
-            }
-
-            mainTerminalContainer.classList.add('hidden');
-            loadingScreen.classList.remove('hidden');
-            initialLoadingBar.style.width = '0%'; 
-            console.log("Reboot: Hidden mainTerminalContainer, shown loadingScreen for reboot.");
-
-            let rebootProgress = 0;
-            const rebootInterval = setInterval(() => {
-                rebootProgress += 10;
-                if (rebootProgress > 100) rebootProgress = 100;
-                initialLoadingBar.style.width = `${rebootProgress}%`;
-                if (rebootProgress >= 100) {
-                    clearInterval(rebootInterval);
-                    console.log("Reboot loading complete (100%). Clearing interval.");
-                    setTimeout(() => { 
-                        loadingScreen.classList.add('hidden');
-                        mainTerminalContainer.classList.remove('hidden');
-                        terminalInput.disabled = false; 
-                        terminalInput.focus();
-                        console.log("Reboot: Loading screen hidden, Main terminal container shown after reboot.");
-                        
-                        connectionStatusIndicator.textContent = "СОЕДИНЕНИЕ: СТАБИЛЬНО";
-                        connectionStatusIndicator.classList.remove('warning'); 
-                        connectionStatusIndicator.classList.add('online');
-                        
-                        initializeTerminalDisplay(); 
-                        startPingMeasurement(); // Перезапуск пинга после перезагрузки
-                    }, 300); 
-                }
-            }, 80);
+            localStorage.removeItem('stalker_terminal_terminalOutput');
+            window.location.reload();
         });
     }
 });
-
 
 terminalInput.addEventListener('keydown', function(event) {
     if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
         playRandomSound(keyPressSounds);
     }
-
     if (event.key === 'Enter') {
-        event.preventDefault(); 
+        event.preventDefault();
         playRandomSound(enterSounds);
-        if (!isTyping) { 
+        if (!isTyping) {
             processCommand();
-        } else {
-            console.log("Enter pressed but still typing, ignoring command.");
         }
     } else if (event.key === 'ArrowUp') {
         event.preventDefault();
-        if (commandHistory.length > 0) { 
-            if (historyIndex === -1) { 
-                historyIndex = 0;
-            } else if (historyIndex < commandHistory.length - 1) {
+        if (commandHistory.length > 0) {
+            if (historyIndex < commandHistory.length - 1) {
                 historyIndex++;
             }
             terminalInput.value = commandHistory[historyIndex];
-            setTimeout(() => { 
-                terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length;
-            }, 0);
-            console.log("History UP, current index:", historyIndex, "command:", terminalInput.value);
+            setTimeout(() => terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length, 0);
         }
     } else if (event.key === 'ArrowDown') {
         event.preventDefault();
-        if (historyIndex > 0) {
+        if (historyIndex > -1) {
             historyIndex--;
-            terminalInput.value = commandHistory[historyIndex];
-            setTimeout(() => { 
-                terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length;
-            }, 0);
-            console.log("History DOWN, current index:", historyIndex, "command:", terminalInput.value);
-        } else if (historyIndex === 0) {
-            historyIndex = -1; 
-            terminalInput.value = '';
-            console.log("History DOWN, cleared input.");
+            terminalInput.value = historyIndex === -1 ? '' : commandHistory[historyIndex];
+            setTimeout(() => terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length, 0);
         }
     }
 });
 
-
 socket.on('terminal_output', function(data) {
-    console.log("Socket: Received terminal_output:", data.output);
     if (data.output === "<CLEAR_TERMINAL>\n") {
-        terminalOutput.value = ''; 
-        displayOutput(prompt, false, true); 
+        terminalOutput.value = '';
+        displayOutput(prompt, false, true);
         playSingleSound(commandDoneSound);
-        console.log("Terminal cleared by server command (internal clear).");
         return;
     }
-
     displayOutput(data.output, true);
     playSingleSound(commandDoneSound);
 });
 
-// --- ОБНОВЛЕННЫЙ ОБРАБОТЧИК ДЛЯ ОТОБРАЖЕНИЯ ДАННЫХ СИНДИКАТА ---
 socket.on('update_ui_state', function(data) {
-    console.log("Socket: Received update_ui_state:", data);
     const role = data.role;
     const showUiPanel = data.show_ui_panel;
-
     if (uiBottomPanel) {
-        if (showUiPanel) {
-            uiBottomPanel.classList.remove('hidden');
-            console.log("UI Bottom Panel shown for role:", role);
-        } else {
-            uiBottomPanel.classList.add('hidden');
-            console.log("UI Bottom Panel hidden for role:", role);
-        }
+        uiBottomPanel.classList.toggle('hidden', !showUiPanel);
     }
-
-    // Обновляем общую для всех частоту (личный канал)
     if (channelFrequencyElement && data.channel_frequency) {
         channelFrequencyElement.textContent = data.channel_frequency;
     }
-
-    // Логика для отображения частот отрядов для Синдиката
     if (role === 'syndicate' && data.squad_frequencies) {
-        if (alphaFreqLine && betaFreqLine && alphaFrequencyElement && betaFrequencyElement) {
-            alphaFrequencyElement.textContent = data.squad_frequencies.alpha || '--.-- МГц';
-            betaFrequencyElement.textContent = data.squad_frequencies.beta || '--.-- МГц';
-            alphaFreqLine.classList.remove('hidden');
-            betaFreqLine.classList.remove('hidden');
-            // Скрываем личный канал связи, т.к. у Синдиката его нет
-            if(channelFrequencyElement) channelFrequencyElement.parentElement.classList.add('hidden');
-        }
+        alphaFrequencyElement.textContent = data.squad_frequencies.alpha || '--.-- МГц';
+        betaFrequencyElement.textContent = data.squad_frequencies.beta || '--.-- МГц';
+        alphaFreqLine.classList.remove('hidden');
+        betaFreqLine.classList.remove('hidden');
+        if (channelFrequencyElement) channelFrequencyElement.parentElement.classList.add('hidden');
     } else {
-        // Убеждаемся, что для других ролей эти строки скрыты, а личный канал показан
-        if (alphaFreqLine && betaFreqLine) {
-            alphaFreqLine.classList.add('hidden');
-            betaFreqLine.classList.add('hidden');
-        }
-        if(channelFrequencyElement) channelFrequencyElement.parentElement.classList.remove('hidden');
+        if (alphaFreqLine) alphaFreqLine.classList.add('hidden');
+        if (betaFreqLine) betaFreqLine.classList.add('hidden');
+        if (channelFrequencyElement) channelFrequencyElement.parentElement.classList.remove('hidden');
     }
 });
 
-// Обработка pong ответа для измерения пинга
 socket.on('pong_response', function() {
-    const endTime = Date.now();
-    const pingTime = endTime - window.pingStartTime;
-    currentPing = pingTime;
+    currentPing = Date.now() - window.pingStartTime;
     if (networkPingElement) {
         networkPingElement.textContent = `${currentPing}мс`;
     }
-    console.log(`Ping: ${pingTime}ms`);
 });
 
-// Функция для начала измерения пинга
 function startPingMeasurement() {
-    if (pingIntervalId) { // Если уже запущен, сначала очистить
-        clearInterval(pingIntervalId);
-    }
-    // Отправляем пинг каждые 3 секунды
+    if (pingIntervalId) clearInterval(pingIntervalId);
     pingIntervalId = setInterval(() => {
         window.pingStartTime = Date.now();
         socket.emit('ping_check');
     }, 3000);
-    console.log("Started ping measurement.");
 }
-
 
 function processCommand() {
     let fullCommand = terminalInput.value.trim();
-    console.log("Processing command:", fullCommand);
-    
     if (fullCommand === '') {
-        displayOutput(prompt, false, true); 
-        terminalInput.value = ''; 
-        console.log("Empty command, showing prompt.");
+        displayOutput(prompt, false, true);
+        terminalInput.value = '';
         return;
     }
-
-    if (commandHistory.length === 0 || commandHistory[0] !== fullCommand) {
+    if (commandHistory[0] !== fullCommand) {
         commandHistory.unshift(fullCommand);
         saveDataToLocalStorage();
-        console.log("Command added to history.");
     }
-    historyIndex = -1; 
-
-    displayOutput(prompt + fullCommand, true, true); 
-    console.log("Echoing command instantly:", prompt + fullCommand);
-
-    const parts = fullCommand.split(' ');
-    const cmdName = parts[0].toLowerCase();
-    const args = parts.slice(1);
-
-    if (commandPlugins[cmdName]) { // Проверяем, есть ли команда в локальных плагинах
-        commandPlugins[cmdName](args);
-        terminalInput.value = ''; 
-    } else { // Если нет, отправляем на сервер
-        setTimeout(() => {
-            socket.emit('terminal_input', { command: fullCommand });
-            terminalInput.value = ''; 
-            console.log("Command emitted to server, input cleared.");
-        }, 50); 
+    historyIndex = -1;
+    displayOutput(prompt + fullCommand + '\n', false, true);
+    const cmdName = fullCommand.split(' ')[0].toLowerCase();
+    if (commandPlugins[cmdName]) {
+        commandPlugins[cmdName](fullCommand.split(' ').slice(1));
+        terminalInput.value = '';
+    } else {
+        socket.emit('terminal_input', {
+            command: fullCommand
+        });
+        terminalInput.value = '';
     }
 }
 
 function displayOutput(text, addNewLine, isInstant = false) {
-    console.log(`displayOutput called: text="${text.substring(0, Math.min(text.length, 30))}"..., addNewLine=${addNewLine}, isInstant=${isInstant}, isTyping=${isTyping}`);
-    
-    if (isTyping && !isInstant) { 
-        console.log("Skipping displayOutput: Still typing and not instant.");
-        return; 
-    }
-
+    if (isTyping && !isInstant) return;
     if (isInstant) {
         terminalOutput.value += text;
-        if (addNewLine && !text.endsWith('\n')) { // Добавляем новую строку, если ее нет
-            terminalOutput.value += '\n'; 
+        if (addNewLine && !text.endsWith('\n')) {
+            terminalOutput.value += '\n';
         }
-        terminalOutput.scrollTop = terminalOutput.scrollHeight; 
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
         terminalInput.focus();
-        console.log("Instant output completed. Output value length:", terminalOutput.value.length);
+        saveDataToLocalStorage();
         return;
     }
-
     isTyping = true;
     let i = 0;
-    
     function typeChar() {
         if (i < text.length) {
-            terminalOutput.value += text.charAt(i);
-            i++;
-            terminalOutput.scrollTop = terminalOutput.scrollHeight; 
+            terminalOutput.value += text.charAt(i++);
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
             setTimeout(typeChar, TYPING_SPEED);
         } else {
-            if (addNewLine && !text.endsWith('\n')) { // Добавляем новую строку, если ее нет
-                terminalOutput.value += '\n'; 
+            if (addNewLine && !text.endsWith('\n')) {
+                terminalOutput.value += '\n';
             }
             isTyping = false;
-            console.log("Typing animation finished. Final output value length:", terminalOutput.value.length);
-            
-            // Проверка на то, нужно ли добавлять prompt
-            const lastLine = terminalOutput.value.split('\n').pop().trim();
-            if (!lastLine.startsWith(prompt.trim())) { // Если последняя строка не является prompt
-                displayOutput(prompt, false, true); 
-            }
-            
-            if (terminalInput.disabled && !text.includes("Сеанс завершен")) {
-                terminalInput.disabled = false;
-                terminalInput.focus();
-                console.log("Input enabled and focused after typing.");
-            } else if (!terminalInput.disabled) {
-                terminalInput.focus();
-                console.log("Input focused after typing.");
-            }
-            terminalOutput.scrollTop = terminalOutput.scrollHeight; 
+            displayOutput(prompt, false, true);
+            terminalInput.focus();
         }
     }
     typeChar();
 }
 
-
 function updateSystemTimeAndUptime() {
     const now = new Date();
-    // Для московского времени (UTC+3)
-    const mskOffset = 3; // часа
-    const localTime = now.getTime();
-    const localOffset = now.getTimezoneOffset() * 60 * 1000; // в миллисекундах
-    const utc = localTime + localOffset;
-    const mskTime = new Date(utc + (3600000 * mskOffset));
-
-    const hours = String(mskTime.getHours()).padStart(2, '0');
-    const minutes = String(mskTime.getMinutes()).padStart(2, '0');
-    const seconds = String(mskTime.getSeconds()).padStart(2, '0');
-    if (systemTimeElement) {
-        systemTimeElement.textContent = `${hours}:${minutes}:${seconds}`;
-    }
-
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    if (systemTimeElement) systemTimeElement.textContent = `${hours}:${minutes}:${seconds}`;
     uptimeSeconds++;
     const uptHours = String(Math.floor(uptimeSeconds / 3600)).padStart(2, '0');
     const uptMinutes = String(Math.floor((uptimeSeconds % 3600) / 60)).padStart(2, '0');
     const uptSeconds = String(uptimeSeconds % 60).padStart(2, '0');
-    if (uptimeElement) {
-        uptimeElement.textContent = `${uptHours}:${uptMinutes}:${uptSeconds}`;
-    }
+    if (uptimeElement) uptimeElement.textContent = `${uptHours}:${uptMinutes}:${uptSeconds}`;
 }
 
-// --- Работа с localStorage для автосохранения ---
 function saveDataToLocalStorage() {
     try {
         localStorage.setItem('stalker_terminal_commandHistory', JSON.stringify(commandHistory));
         localStorage.setItem('stalker_terminal_terminalOutput', terminalOutput.value);
         localStorage.setItem('stalker_terminal_soundEnabled', JSON.stringify(soundEnabled));
-        console.log("Data saved to localStorage.");
-    } catch (e) {
-        console.warn("Failed to save data to localStorage:", e);
-    }
-}
-
-// 1. Обновленная функция загрузки из localStorage
-function loadDataFromLocalStorage() {
-    try {
-        const savedHistory = JSON.parse(localStorage.getItem('stalker_terminal_commandHistory'));
-        const savedOutput = localStorage.getItem('stalker_terminal_terminalOutput');
-        const savedSound = JSON.parse(localStorage.getItem('stalker_terminal_soundEnabled'));
-
-        if (Array.isArray(savedHistory)) {
-            commandHistory = savedHistory;
-            console.log("Loaded command history from localStorage.");
-        }
-        
-        if (typeof savedSound === 'boolean') {
-            soundEnabled = savedSound;
-            if(toggleSoundButton) {
-                toggleSoundButton.textContent = `ЗВУК: ${soundEnabled ? 'ВКЛ' : 'ВЫКЛ'}`;
-            }
-            console.log("Loaded sound setting from localStorage:", soundEnabled);
-        }
-
-        // Ключевое изменение: проверяем, есть ли сохраненный вывод
-        if (typeof savedOutput === 'string' && savedOutput.trim() !== '') {
-            terminalOutput.value = savedOutput;
-            terminalOutput.scrollTop = terminalOutput.scrollHeight;
-            console.log("Loaded terminal output from localStorage.");
-            return true; // Сообщаем, что загрузка прошла успешно
-        }
-
-    } catch (e) {
-        console.warn("Failed to load data from localStorage:", e);
-    }
-    return false; // Сообщаем, что загружать было нечего
+    } catch (e) {}
 }
