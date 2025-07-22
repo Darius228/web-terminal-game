@@ -59,12 +59,20 @@ SQUAD_FREQUENCIES = {"alpha": "142.7 МГц", "beta": "148.8 МГц"}
 active_users = {}
 active_operatives = {}
 
-def log_terminal_event(event_type, user_info, message):
+def log_terminal_event(event_type, user_info, message, allow_log_to_sheet=True):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     console_log_entry = f"[{timestamp}] [{event_type.upper()}] [Пользователь: {user_info}] {message}"
     print(console_log_entry)
-    sheet_row_data = [timestamp, event_type.upper(), user_info, message]
-    google_sheets_api.append_row(LOG_SHEET_NAME, sheet_row_data)
+
+    # Защита от рекурсии — если ошибка происходит в append_row, логируем только в консоль
+    if allow_log_to_sheet:
+        try:
+            sheet_row_data = [timestamp, event_type.upper(), user_info, message]
+            google_sheets_api.append_row(LOG_SHEET_NAME, sheet_row_data)
+        except RecursionError:
+            print("❌ Ошибка при добавлении строки в 'Логи': превышена глубина рекурсии.")
+        except Exception as e:
+            print(f"❌ Ошибка при добавлении строки в 'Логи': {e}")
 
 def load_data_from_sheets():
     global REGISTERED_USERS, CONTRACTS, PENDING_REQUESTS
