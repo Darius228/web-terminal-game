@@ -18,13 +18,14 @@ LOG_SHEET_NAME = "Логи"
 # --- Глобальные переменные и константы ---
 ROLE_PERMISSIONS = {
     "guest": ["help", "login", "clear", "ping"],
-    "operative": ["help", "ping", "sendmsg", "contracts", "view_orders", "exit", "clear"],
-    "commander": ["help", "ping", "sendmsg", "contracts", "assign_contract", "view_users_squad", "setchannel", "exit", "clear"],
+    # --- ИЗМЕНЕНИЕ: Добавлена команда view_contract ---
+    "operative": ["help", "ping", "sendmsg", "contracts", "view_orders", "view_contract", "exit", "clear"],
+    "commander": ["help", "ping", "sendmsg", "contracts", "assign_contract", "view_users_squad", "setchannel", "view_contract", "exit", "clear"],
     "client": ["help", "ping", "create_request", "view_my_requests", "exit", "clear"], # Убрана команда sendmsg
     "syndicate": [
         "help", "ping", "sendmsg", "resetkeys", "viewkeys", "register_user",
         "unregister_user", "view_users", "viewrequests", "acceptrequest",
-        "declinerequest", "contracts", "exit", "clear", "syndicate_assign" # <-- Новая команда
+        "declinerequest", "contracts", "exit", "clear", "syndicate_assign" 
     ]
 }
 COMMAND_DESCRIPTIONS = {
@@ -34,6 +35,8 @@ COMMAND_DESCRIPTIONS = {
     "ping": "Проверяет соединение.",
     "sendmsg": "Отправляет сообщение. sendmsg <сообщение> | sendmsg <UID> <сообщение>",
     "contracts": "Просмотр всех активных и назначенных контрактов.",
+    # --- ИЗМЕНЕНИЕ: Добавлено описание для view_contract ---
+    "view_contract": "Просмотр деталей контракта. view_contract <ID_контракта>",
     "view_orders": "Просмотр ваших контрактов.",
     "assign_contract": "Назначить контракт оперативнику (или себе). assign_contract <ID_контракта> <UID>",
     "view_users_squad": "Просмотр оперативников в отряде.",
@@ -548,7 +551,47 @@ def handle_terminal_input(data):
                 found_orders = True
         if not found_orders: output += "  У вас нет текущих назначений.\n"
         output += "---------------------------\n"
+        
+    # --- НОВЫЙ БЛОК: Логика команды view_contract ---
+    elif base_command == "view_contract" and current_role in ["operative", "commander"]:
+        contract_id_str = args.strip()
+        if not contract_id_str:
+            output = "ℹ️ Использование: view_contract <ID_контракта>\n"
+        else:
+            try:
+                contract_id = int(contract_id_str)
+                load_data_from_sheets()
+                target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
 
+                if not target_contract:
+                    output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
+                else:
+                    # Проверка доступа: контракт должен быть назначен либо лично пользователю, либо его отряду.
+                    user_squad = session.get('squad')
+                    user_callsign = session.get('callsign')
+                    assignee = str(target_contract.get('Назначено', '')).lower()
+                    
+                    can_view = False
+                    if assignee == user_callsign.lower():
+                        can_view = True
+                    elif user_squad and user_squad in assignee.split(','):
+                        can_view = True
+                    
+                    if not can_view:
+                        output = f"❌ У вас нет доступа к деталям этого контракта (ID: {contract_id}).\n"
+                    else:
+                        output = f"--- 📜 ДЕТАЛИ КОНТРАКТА ID: {target_contract.get('ID')} ---\n"
+                        output += f"  Название: {target_contract.get('Название', 'Н/Д')}\n"
+                        output += f"  Описание: {target_contract.get('Описание', 'Н/Д')}\n"
+                        output += f"  Награда:  {target_contract.get('Награда', 'Н/Д')}\n"
+                        output += f"  Статус:   {target_contract.get('Статус', 'Н/Д').upper()}\n"
+                        output += f"  Назначен: {target_contract.get('Назначено', 'Н/Д')}\n"
+                        output += "--------------------------------------\n"
+                        log_terminal_event("action", user_info, f"Просмотрел детали контракта ID:{contract_id}")
+
+            except ValueError:
+                output = "❌ ID контракта должен быть числом.\n"
+                
     elif base_command == "create_request" and current_role == "client":
         req_parts = args.split(" ", 2)
         if len(req_parts) < 3:
@@ -568,7 +611,6 @@ def handle_terminal_input(data):
             else:
                 output = "❌ Ошибка создания запроса в Google Sheets.\n"
     
-    # *** ИСПРАВЛЕННЫЙ БЛОК: Отступы для syndicate_assign и последующих команд ***
     elif base_command == "syndicate_assign" and current_role == "syndicate":
         assign_parts = args.split(" ")
         if len(assign_parts) != 2:
@@ -582,14 +624,12 @@ def handle_terminal_input(data):
                     output = "❌ Неверное имя отряда. Допустимы: alpha, beta, alpha,beta.\n"
                 else:
                     load_data_from_sheets()
-                    # Проверяем, существует ли контракт, прежде чем обновлять
                     if any(c.get('ID') == contract_id for c in CONTRACTS):
                         updates = {'Назначено': squads_str, 'Статус': 'Назначен'}
                         if google_sheets_api.update_row_by_key('Контракты', 'ID', contract_id, updates):
                              output = f"✅ Контракт ID:{contract_id} назначен отряду(ам): {squads_str}.\n"
                              log_terminal_event("syndicate_action", user_info, f"Назначил контракт {contract_id} на {squads_str}")
                         else:
-                            # Эта ошибка маловероятна, если предыдущая проверка прошла, но оставляем для полноты
                             output = "❌ Ошибка обновления контракта в Google Sheets.\n"
                     else:
                         output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
