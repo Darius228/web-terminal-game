@@ -10,14 +10,13 @@ from flask_socketio import SocketIO, emit, join_room, leave_room
 # Импортируем наш модуль для работы с Google Таблицами
 import google_sheets_api
 
-# --- НОВЫЕ КОНСТАНТЫ ---
+# --- Константы для названий листов ---
 LOG_SHEET_NAME = "Логи"
-MESSAGES_SHEET_NAME = "Сообщения" # Название нового листа для сообщений
+MESSAGES_SHEET_NAME = "Сообщения"
 
 # --- Глобальные переменные и константы ---
 ROLE_PERMISSIONS = {
     "guest": ["help", "login", "clear", "ping"],
-    # --- ИЗМЕНЕНИЕ: Добавлена команда msghistory ---
     "operative": ["help", "ping", "sendmsg", "msghistory", "contracts", "view_orders", "view_contract", "exit", "clear"],
     "commander": ["help", "ping", "sendmsg", "msghistory", "contracts", "assign_contract", "view_users_squad", "setchannel", "view_contract", "exit", "clear"],
     "client": ["help", "ping", "create_request", "view_my_requests", "exit", "clear"],
@@ -33,7 +32,6 @@ COMMAND_DESCRIPTIONS = {
     "clear": "Очищает окно терминала.",
     "ping": "Проверяет соединение.",
     "sendmsg": "Отправляет сообщение. sendmsg <сообщение> | sendmsg <UID> <сообщение>",
-    # --- ИЗМЕНЕНИЕ: Добавлено описание для msghistory ---
     "msghistory": "Показывает последние 20 сообщений в чате вашего отряда.",
     "contracts": "Просмотр всех активных и назначенных контрактов.",
     "view_contract": "Просмотр деталей контракта. view_contract <ID_контракта>",
@@ -68,13 +66,16 @@ active_operatives = {}
 active_users = {}
 
 def log_terminal_event(event_type, user_info, message):
+    """
+    Формирует запись лога и отправляет ее в Google Таблицу.
+    Также выводит лог в консоль сервера для отладки в реальном времени.
+    """
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     console_log_entry = f"[{timestamp}] [{event_type.upper()}] [Пользователь: {user_info}] {message}"
     print(console_log_entry)
     sheet_row_data = [timestamp, event_type.upper(), user_info, message]
     google_sheets_api.append_row(LOG_SHEET_NAME, sheet_row_data)
 
-# --- НОВАЯ ФУНКЦИЯ: Запись сообщения в Google Таблицу ---
 def log_message_to_sheet(sender_uid, sender_callsign, sender_squad, recipient_type, recipient_id, message_text):
     """Сохраняет отправленное сообщение в лист 'Сообщения'."""
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -146,7 +147,6 @@ load_data_from_sheets()
 def index():
     return render_template('index.html')
 
-# ... (остальные обработчики @socketio.on('connect'), @socketio.on('disconnect'), @socketio.on('login') остаются без изменений) ...
 @socketio.on('connect')
 def handle_connect():
     session['role'] = 'guest'
@@ -245,7 +245,6 @@ def handle_terminal_input(data):
     elif base_command == "ping":
         output = "📡 Пинг: 42мс (стабильно)\n"
 
-    # --- ИЗМЕНЕНИЕ: Обновлена логика sendmsg для сохранения сообщений ---
     elif base_command == "sendmsg":
         if current_role not in ["operative", "commander", "syndicate"]:
             output = "❌ Ошибка: Команда 'sendmsg' доступна только для Оперативников, Командиров и Синдиката.\n"
@@ -262,7 +261,6 @@ def handle_terminal_input(data):
                 target_callsign = REGISTERED_USERS[target_uid]['Позывной']
                 target_sid = next((sid for sid, user_data in active_users.items() if user_data.get('uid') == target_uid), None)
                 if target_sid:
-                    # Сохраняем личное сообщение
                     log_message_to_sheet(user_uid, user_callsign, user_squad, 'private', target_uid, message_text_if_private)
                     emit('terminal_output', {'output': f"💬 [ЛИЧНО] От {user_callsign}: {message_text_if_private}\n"}, room=target_sid)
                     output = f"✅ Сообщение отправлено '{target_callsign}'.\n"
@@ -272,13 +270,11 @@ def handle_terminal_input(data):
             else:
                 full_message = args
                 if current_role == "syndicate":
-                    # Сохраняем глобальное сообщение
                     log_message_to_sheet(user_uid, user_callsign, user_squad, 'global', 'all', full_message)
                     emit('terminal_output', {'output': f"📢 [ГЛОБАЛ] Синдикат {user_callsign}: {full_message}\n"}, broadcast=True)
                     output = "✅ Глобальное сообщение отправлено.\n"
                     log_terminal_event("message_sent", user_info, f"Глобальное сообщение: '{full_message}'")
                 elif user_squad and user_squad.lower() != 'none':
-                    # Сохраняем сообщение отряда
                     log_message_to_sheet(user_uid, user_callsign, user_squad, 'squad', user_squad, full_message)
                     message_to_send = f"💬 [{user_squad.upper()}] {user_callsign}: {full_message}\n"
                     emit('terminal_output', {'output': message_to_send}, room=user_squad)
@@ -287,7 +283,6 @@ def handle_terminal_input(data):
                 else:
                     output = "❌ Ошибка: Не указан получатель или вы не состоите в отряде.\n"
 
-    # --- НОВЫЙ БЛОК: Логика команды msghistory ---
     elif base_command == "msghistory" and current_role in ["operative", "commander"]:
         if not user_squad or user_squad.lower() == 'none':
             output = "❌ Ошибка: Вы не состоите в отряде, чтобы просматривать историю сообщений.\n"
@@ -303,12 +298,10 @@ def handle_terminal_input(data):
             if not squad_messages:
                 output += "  Сообщений пока нет.\n"
             else:
-                # Сортируем по времени (от старых к новым) и берем последние 20
                 squad_messages.sort(key=lambda x: x.get('Timestamp', ''))
                 recent_messages = squad_messages[-20:]
                 
                 for msg in recent_messages:
-                    # Форматируем для красивого вывода
                     ts = msg.get('Timestamp', '----')
                     sender = msg.get('Sender_Callsign', 'Неизвестный')
                     text = msg.get('Message_Text', '')
@@ -316,15 +309,21 @@ def handle_terminal_input(data):
 
             output += "--------------------------------------------------------\n"
 
-    # ... (остальные команды остаются без изменений) ...
     elif base_command == "exit":
         if current_role == "guest":
             output = "ℹ️ Вы уже находитесь в режиме Гостя. Для входа в систему используйте 'login'.\n"
         else:
-            if session.get('squad') and session['squad'].lower() != 'none': leave_room(session['squad'])
-            if current_role == "syndicate": leave_room("syndicate_room")
-            if request.sid in active_operatives: del active_operatives[request.sid]
-            if request.sid in active_users: active_users[request.sid] = {'uid': None, 'callsign': None, 'role': 'guest', 'squad': None}
+            if session.get('squad') and session['squad'].lower() != 'none':
+                leave_room(session['squad'])
+            if current_role == "syndicate":
+                leave_room("syndicate_room")
+            
+            if request.sid in active_operatives:
+                del active_operatives[request.sid]
+            
+            if request.sid in active_users:
+                active_users[request.sid] = {'uid': None, 'callsign': None, 'role': 'guest', 'squad': None}
+
             log_terminal_event("logout", user_info, "Выход из системы.")
             session.clear()
             session['role'] = 'guest'
@@ -333,9 +332,12 @@ def handle_terminal_input(data):
             session['squad'] = None
             output = "🔌 Вы вышли из системы. Роль сброшена до гостя.\n"
             socketio.emit('update_ui_state', {'role': 'guest', 'show_ui_panel': False}, room=request.sid)
+
     elif base_command == "resetkeys" and current_role == "syndicate":
         role_to_reset = args.strip().lower()
-        if role_to_reset == "заказчик": role_to_reset = "client"
+        if role_to_reset == "заказчик":
+            role_to_reset = "client"
+
         if not role_to_reset or role_to_reset not in ["operative", "commander", "client"]:
             output = "ℹ️ Использование: resetkeys <operative | commander | client>\n"
         elif role_to_reset not in ACCESS_KEYS:
@@ -347,20 +349,24 @@ def handle_terminal_input(data):
             else:
                 new_keys_for_role = [secrets.token_hex(4) for _ in range(num_keys)]
                 ACCESS_KEYS[role_to_reset] = new_keys_for_role
+
                 KEY_TO_ROLE.clear()
                 for role, keys_list in ACCESS_KEYS.items():
                     for key in keys_list:
                         KEY_TO_ROLE[key] = role
+                
                 output = f"--- 🔑 Сгенерированы новые ключи для роли '{role_to_reset.upper()}'. ---\n"
                 output += "ВНИМАНИЕ: Для применения этих ключей обновите переменную окружения 'ACCESS_KEYS_JSON' и перезапустите приложение.\n"
                 output += f"{role_to_reset.upper()}: {', '.join(new_keys_for_role)}\n"
                 log_terminal_event("syndicate_action", user_info, f"Сгенерированы новые ключи для роли: {role_to_reset}.")
+
     elif base_command == "viewkeys" and current_role == "syndicate":
         output = "--- 🔑 ТЕКУЩИЕ АКТИВНЫЕ КЛЮЧИ ДОСТУПА ---\n"
         for role, keys in ACCESS_KEYS.items():
             if role == "guest": continue
             output += f"{role.upper()}: {', '.join(keys)}\n"
         output += "--------------------------------------\n"
+
     elif base_command == "register_user" and current_role == "syndicate":
         reg_parts = args.split(" ", 3)
         if len(reg_parts) < 4:
@@ -368,8 +374,11 @@ def handle_terminal_input(data):
         else:
             key, uid, callsign, squad_input = reg_parts
             squad_input = squad_input.lower()
-            load_data_from_sheets()
+
+            load_data_from_sheets() 
+
             key_is_used = any(user.get("Ключ Доступа") == key for user in REGISTERED_USERS.values())
+            
             if key_is_used:
                 output = f"❌ Ошибка: Ключ '{key}' уже используется другим пользователем.\n"
             elif uid in REGISTERED_USERS:
@@ -384,9 +393,11 @@ def handle_terminal_input(data):
                         if squad_input not in ["alpha", "beta"]:
                             output = "❌ Ошибка: Для оперативника/командира отряд должен быть 'alpha' или 'beta'.\n"; emit('terminal_output', {'output': output}); return
                         squad_to_assign = squad_input
+                        
                         commander_count = sum(1 for u in REGISTERED_USERS.values() if u.get('Роль') == 'commander' and u.get('Отряд') == squad_to_assign)
                         if role_from_key == "commander" and commander_count >= 1:
                             output = f"❌ Ошибка: В отряде '{squad_to_assign}' уже есть Командир.\n"; emit('terminal_output', {'output': output}); return
+
                     user_data_row = [uid, key, role_from_key, callsign, squad_to_assign]
                     if google_sheets_api.append_row('Пользователи', user_data_row):
                         REGISTERED_USERS[uid] = {"UID": uid, "Ключ Доступа": key, "Роль": role_from_key, "Позывной": callsign, "Отряд": squad_to_assign}
@@ -396,6 +407,7 @@ def handle_terminal_input(data):
                         log_terminal_event("syndicate_action", user_info, f"Зарегистрирован пользователь: UID={uid}, Callsign={callsign}.")
                     else:
                         output = "❌ Ошибка: Не удалось зарегистрировать пользователя в Google Таблицах.\n"
+
     elif base_command == "unregister_user" and current_role == "syndicate":
         target_uid = args.strip()
         if not target_uid:
@@ -412,9 +424,11 @@ def handle_terminal_input(data):
                     log_terminal_event("syndicate_action", user_info, f"Дерегистрирован пользователь: UID={target_uid}.")
                 else:
                     output = "❌ Ошибка: Не удалось деактивировать пользователя в Google Таблицах.\n"
+
     elif base_command == "setchannel" and current_role == "commander":
         new_frequency = args.strip()
         user_squad = session.get('squad')
+
         if not new_frequency:
             output = "ℹ️ Использование: setchannel <новая_частота>\n"
         elif not user_squad or user_squad not in SQUAD_FREQUENCIES:
@@ -423,15 +437,18 @@ def handle_terminal_input(data):
             SQUAD_FREQUENCIES[user_squad] = new_frequency
             output = f"✅ Частота для отряда {user_squad.upper()} установлена на {new_frequency}.\n"
             log_terminal_event("commander_action", user_info, f"Сменил частоту отряда {user_squad} на {new_frequency}")
+
             for sid, user_data in list(active_users.items()):
                 if user_data.get('squad') == user_squad:
                     socketio.emit('update_ui_state', {'channel_frequency': new_frequency}, room=sid, namespace='/')
                     if sid != request.sid:
                         socketio.emit('terminal_output', {'output': f"📢 КОМАНДИР {session['callsign']} сменил частоту вашего отряда на {new_frequency}.\n"}, room=sid, namespace='/')
+            
             socketio.emit('update_ui_state', {'squad_frequencies': SQUAD_FREQUENCIES}, room='syndicate_room', namespace='/')
+    
     elif base_command == "view_users" and current_role == "syndicate":
         output = "--- 👥 ЗАРЕГИСТРИРОВАННЫЕ ПОЛЬЗОВАТЕЛИ ---\n"
-        load_data_from_sheets()
+        load_data_from_sheets() 
         if REGISTERED_USERS:
             for uid, user_data in REGISTERED_USERS.items():
                 output += (f"  UID: {user_data.get('UID', 'N/A')}, Позывной: {user_data.get('Позывной', 'N/A')}, "
@@ -439,6 +456,7 @@ def handle_terminal_input(data):
         else:
             output += "  Нет зарегистрированных пользователей.\n"
         output += "---------------------------------------\n"
+    
     elif base_command == "view_users_squad" and current_role == "commander":
         output = f"--- 👥 ОПЕРАТИВНИКИ В ОТЯДЕ {session['squad'].upper()} ---\n"
         load_data_from_sheets()
@@ -450,8 +468,9 @@ def handle_terminal_input(data):
         if not found_operatives:
             output += "  Нет оперативников в вашем отряде.\n"
         output += "---------------------------------------\n"
+
     elif base_command == "contracts":
-        load_data_from_sheets()
+        load_data_from_sheets() 
         output = "--- 📋 Активные контракты ---\n"
         found = False
         user_squad = session.get('squad')
@@ -460,15 +479,18 @@ def handle_terminal_input(data):
             if status not in ["провален", "выполнен", "failed", "completed"]:
                 assignee = contract.get('Назначено', 'None')
                 assignee_display = assignee if assignee != 'None' else "Никому"
+                
                 if assignee != 'None' and assignee not in ['alpha', 'beta', 'alpha,beta'] and current_role != 'syndicate':
                     assignee_squad = next((u.get('Отряд') for u in REGISTERED_USERS.values() if u.get('Позывной') == assignee), None)
                     if user_squad and assignee_squad and user_squad != assignee_squad:
                          assignee_display = "(другой отряд)"
+                         
                 output += f"ID: {contract.get('ID')}, Название: {contract.get('Название')}, Статус: {status.upper()}, Назначен: {assignee_display}\n"
                 found = True
         if not found:
             output += "  Нет контрактов в работе.\n"
         output += "--------------------------\n"
+    
     elif base_command == "assign_contract" and current_role == "commander":
         assign_parts = args.split(" ")
         if len(assign_parts) < 2:
@@ -479,16 +501,19 @@ def handle_terminal_input(data):
                 target_uid = assign_parts[1]
                 load_data_from_sheets()
                 target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
+                
                 if not target_contract:
                     output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
                 else:
                     is_self_assign = (target_uid == session.get('uid'))
                     target_user_data = REGISTERED_USERS.get(target_uid)
+                    
                     target_callsign = None
                     if is_self_assign:
                         target_callsign = session.get('callsign')
                     elif target_user_data and target_user_data.get('Роль') == 'operative' and target_user_data.get('Отряд') == session.get('squad'):
                         target_callsign = target_user_data.get('Позывной')
+                    
                     if target_callsign:
                         updates = {'Назначено': target_callsign, 'Статус': 'Назначен'}
                         if google_sheets_api.update_row_by_key('Контракты', 'ID', contract_id, updates):
@@ -498,11 +523,13 @@ def handle_terminal_input(data):
                             output = "❌ Ошибка обновления контракта в Google Sheets.\n"
                     else:
                         output = f"❌ UID '{target_uid}' не является оперативником вашего отряда или неверный.\n"
+
             except ValueError:
                 output = "❌ ID контракта должен быть числом.\n"
+
     elif base_command == "view_orders" and current_role == "operative":
         output = "--- 📝 ВАШИ НАЗНАЧЕНИЯ ---\n"
-        load_data_from_sheets()
+        load_data_from_sheets() 
         found_orders = False
         for contract in CONTRACTS:
             if contract.get('Назначено') == session['callsign']:
@@ -512,6 +539,7 @@ def handle_terminal_input(data):
                 found_orders = True
         if not found_orders: output += "  У вас нет текущих назначений.\n"
         output += "---------------------------\n"
+        
     elif base_command == "view_contract" and current_role in ["operative", "commander"]:
         contract_id_str = args.strip()
         if not contract_id_str:
@@ -521,17 +549,20 @@ def handle_terminal_input(data):
                 contract_id = int(contract_id_str)
                 load_data_from_sheets()
                 target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
+
                 if not target_contract:
                     output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
                 else:
                     user_squad = session.get('squad')
                     user_callsign = session.get('callsign')
                     assignee = str(target_contract.get('Назначено', '')).lower()
+                    
                     can_view = False
                     if assignee == user_callsign.lower():
                         can_view = True
                     elif user_squad and user_squad in assignee.split(','):
                         can_view = True
+                    
                     if not can_view:
                         output = f"❌ У вас нет доступа к деталям этого контракта (ID: {contract_id}).\n"
                     else:
@@ -543,8 +574,10 @@ def handle_terminal_input(data):
                         output += f"  Назначен: {target_contract.get('Назначено', 'Н/Д')}\n"
                         output += "--------------------------------------\n"
                         log_terminal_event("action", user_info, f"Просмотрел детали контракта ID:{contract_id}")
+
             except ValueError:
                 output = "❌ ID контракта должен быть числом.\n"
+                
     elif base_command == "create_request" and current_role == "client":
         req_parts = args.split(" ", 2)
         if len(req_parts) < 3:
@@ -554,13 +587,16 @@ def handle_terminal_input(data):
             load_data_from_sheets()
             valid_ids = [req.get('ID Запроса', 0) for req in PENDING_REQUESTS if isinstance(req.get('ID Запроса'), int)]
             next_request_id = max(valid_ids) + 1 if valid_ids else 1
+            
             request_data_row = [next_request_id, session['uid'], session['callsign'], discord_id, reason, request_text, 'Новый']
+            
             if google_sheets_api.append_row('Запросы Клиентов', request_data_row):
                 output = f"✅ Ваш запрос (ID: {next_request_id}) отправлен.\n"
                 log_terminal_event("client_action", user_info, f"Создан запрос ID={next_request_id}")
                 socketio.emit('terminal_output', {'output': f"🔔 Новый запрос от клиента {session['callsign']} (ID: {next_request_id})!\n"}, room="syndicate_room")
             else:
                 output = "❌ Ошибка создания запроса в Google Sheets.\n"
+    
     elif base_command == "syndicate_assign" and current_role == "syndicate":
         assign_parts = args.split(" ")
         if len(assign_parts) != 2:
@@ -569,6 +605,7 @@ def handle_terminal_input(data):
             try:
                 contract_id = int(assign_parts[0])
                 squads_str = assign_parts[1].lower()
+                
                 if not all(s in ["alpha", "beta"] for s in squads_str.split(',')):
                     output = "❌ Неверное имя отряда. Допустимы: alpha, beta, alpha,beta.\n"
                 else:
@@ -584,9 +621,10 @@ def handle_terminal_input(data):
                         output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
             except ValueError:
                 output = "❌ ID контракта должен быть числом.\n"
+        
     elif base_command == "view_my_requests" and current_role == "client":
         output = "--- ✉️ ВАШИ ЗАПРОСЫ ---\n"
-        load_data_from_sheets()
+        load_data_from_sheets() 
         found_requests = False
         for req in PENDING_REQUESTS:
             if req.get('UID Клиента') == session['uid']:
@@ -595,9 +633,10 @@ def handle_terminal_input(data):
                 found_requests = True
         if not found_requests: output += "  У вас пока нет запросов.\n"
         output += "-----------------------\n"
+
     elif base_command == "viewrequests" and current_role == "syndicate":
         output = "--- ✉️ ЗАПРОСЫ КЛИЕНТОВ (ОЖИДАЮЩИЕ) ---\n"
-        load_data_from_sheets()
+        load_data_from_sheets() 
         found_requests = False
         for req in PENDING_REQUESTS:
             if req.get('Статус', '').lower() == 'новый':
@@ -606,6 +645,7 @@ def handle_terminal_input(data):
                 found_requests = True
         if not found_requests: output += "  Нет ожидающих запросов.\n"
         output += "--------------------------------------\n"
+
     elif base_command == "acceptrequest" and current_role == "syndicate":
         req_parts = args.split(" ", 3)
         if len(req_parts) < 4:
@@ -614,7 +654,7 @@ def handle_terminal_input(data):
             try:
                 request_id = int(req_parts[0])
                 contract_title, contract_description, contract_reward = req_parts[1], req_parts[2], req_parts[3]
-                load_data_from_sheets()
+                load_data_from_sheets() 
                 target_request = next((r for r in PENDING_REQUESTS if r.get('ID Запроса') == request_id), None)
                 if not target_request:
                     output = f"❌ Ошибка: Запрос с ID '{request_id}' не найден.\n"
@@ -642,6 +682,7 @@ def handle_terminal_input(data):
                 output = "❌ Ошибка: ID запроса должен быть числом.\n"
                 emit('terminal_output', {'output': output})
                 return
+
     elif base_command == "declinerequest" and current_role == "syndicate":
         parts = args.split(" ")
         if not parts or not parts[0]:
@@ -649,7 +690,7 @@ def handle_terminal_input(data):
         else:
             try:
                 request_id = int(parts[0])
-                load_data_from_sheets()
+                load_data_from_sheets() 
                 target_request = next((r for r in PENDING_REQUESTS if r.get('ID Запроса') == request_id), None)
                 if not target_request:
                     output = f"❌ Ошибка: Запрос с ID '{request_id}' не найден.\n"
@@ -662,7 +703,7 @@ def handle_terminal_input(data):
                         log_terminal_event("syndicate_action", user_info, f"Отклонен запрос ID:{request_id}.")
                         client_sid = next((sid for sid, data in active_users.items() if data.get('uid') == target_request.get('UID Клиента')), None)
                         if client_sid:
-                            socketio.emit('terminal_output', {'output': f"🔔 Ваш запрос (ID: {request_id}) был ОТКЛОНЕН Синдикатом.\n"}, room=client_sid)
+                            socketio.emit('terminal_output', {'output': f"🔔 Ваш запрос (ID: {request_id}) был ОТКЛОНЕН Синдикатом!\n"}, room=client_sid)
                     else:
                         output = "❌ Ошибка: Не удалось отклонить запрос в Google Таблицах.\n"
             except ValueError:
