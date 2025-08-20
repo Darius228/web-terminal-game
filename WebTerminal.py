@@ -134,9 +134,15 @@ def load_data_from_sheets():
     print("Данные успешно загружены.")
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_very_temporary_secret_key_for_dev_only')
+secret = os.environ.get('FLASK_SECRET_KEY')
+if not secret:
+    raise RuntimeError('FLASK_SECRET_KEY обязателен для запуска сервера')
+app.config['SECRET_KEY'] = secret
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-socketio = SocketIO(app)
+app.config['SESSION_COOKIE_HTTPONLY'] = True
+app.config['SESSION_COOKIE_SECURE'] = True
+app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
+socketio = SocketIO(app, cors_allowed_origins=[], logger=False, engineio_logger=False)
 
 if not google_sheets_api.init_google_sheets():
     print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать Google Таблицы.")
@@ -153,7 +159,9 @@ def handle_connect():
     session['uid'] = None
     session['callsign'] = None
     session['squad'] = None
+    token = issue_csrf()
     active_users[request.sid] = {'uid': None, 'callsign': None, 'role': 'guest', 'squad': None}
+    emit('csrf_token', {'token': token})
     emit('update_ui_state', {'role': 'guest', 'show_ui_panel': False, 'squad': None})
     log_terminal_event("connection", f"SID:{request.sid}", "Новое подключение.")
 
@@ -167,11 +175,31 @@ def handle_disconnect():
         del active_users[request.sid]
     log_terminal_event("disconnection", f"UID:{uid_disconnected}, Callsign:{callsign_disconnected}, SID:{request.sid}", "Пользователь отключился.")
 
+
+@socketio.on('ping_check')
+def ping_check(data=None):
+    try:
+        require_csrf(data or {})
+    except Exception:
+        return disconnect()
+    emit('pong_response')
+
+
 @socketio.on('login')
 def login(data):
-    uid = str(data.get('uid'))
-    key = data.get('key')
-    user_info = f"UID: {uid}, Key: {key}"
+    if not _rate_ok(request.sid):
+        emit('login_failure', {'message': 'Слишком много запросов. Попробуйте позже.'})
+        return
+    try:
+        require_csrf(data or {})
+    except Exception:
+        return disconnect()
+    ip = request.remote_addr or '0.0.0.0'
+    if not _login_rate_ok(ip):
+        emit('login_failure', {'message': 'Слишком много попыток входа. Попробуйте позже.'})
+        return
+    uid = sanitize((data or {}).get('uid'))
+    key = sanitize((data or {}).get('key'))
     load_data_from_sheets()
     if uid in REGISTERED_USERS and REGISTERED_USERS[uid].get("Ключ Доступа") == key:
         session['uid'] = uid
@@ -183,28 +211,37 @@ def login(data):
         if session['role'] in ["operative", "commander"]:
             active_operatives[request.sid] = {'uid': session['uid'], 'callsign': session['callsign'], 'squad': session['squad']}
             if session['squad'] and session['squad'].lower() != 'none':
-                join_room(session['squad'])
-        if session['role'] == "syndicate":
-            join_room("syndicate_room")
-        log_terminal_event("login_success", user_info, f"Пользователь '{session['callsign']}' успешно вошел как {session['role'].upper()}.")
-        welcome_message = f"✅ Добро пожаловать, {session['callsign']}! Вы вошли как {session['role'].upper()}.\n"
-        emit('terminal_output', {'output': welcome_message})
-        ui_data = {'role': session['role'], 'callsign': session['callsign'], 'squad': session['squad'], 'show_ui_panel': True}
-        if session['role'] == 'syndicate':
-            ui_data['squad_frequencies'] = SQUAD_FREQUENCIES
-            ui_data['channel_frequency'] = "Н/Д"
-        else:
-            ui_data['channel_frequency'] = SQUAD_FREQUENCIES.get(session.get('squad'), '--:--')
-        emit('update_ui_state', ui_data, room=request.sid)
-        return
-    log_terminal_event("login_failure", user_info, "Попытка входа не удалась: неверный UID или ключ доступа.")
-    emit('login_failure', {'message': "❌ Ошибка: Неверный UID или ключ доступа. Повторите попытку."}, room=request.sid)
+                join_room(f"squad_{session['squad'].lower()}")
+        emit('update_ui_state', {'role': session['role'], 'show_ui_panel': True, 'squad': session['squad']})
+        log_terminal_event("login", f"UID:{session['uid']}, Role:{session['role']}, Call:{session['callsign']}", "Успешный вход")
+        emit('terminal_output', {'output': "✅ Успешный вход. Добро пожаловать!\n"})
+    else:
+        emit('login_failure', {'message': "❌ Неверный UID или ключ."})
+        log_terminal_event("login_fail", f"UID:{uid}", "Неуспешная попытка входа")
+
+
 
 @socketio.on('terminal_input')
 def handle_terminal_input(data):
     global ROLE_PERMISSIONS, COMMAND_DESCRIPTIONS, SQUAD_FREQUENCIES, ACCESS_KEYS, KEY_TO_ROLE
 
-    command = data.get('command', '').strip()
+    if not _rate_ok(request.sid):
+        emit('terminal_output', {'output': "⏳ Слишком много запросов. Подождите немного.\n"})
+        return
+    try:
+        require_csrf(data or {})
+    except Exception:
+        return disconnect()
+
+    raw_command = (data or {}).get('command', '')
+    if not isinstance(raw_command, str):
+        emit('terminal_output', {'output': "❌ Неверный формат команды.\n"})
+        return
+    if len(raw_command) > MAX_MESSAGE_LENGTH:
+        emit('terminal_output', {'output': "❌ Команда слишком длинная.\n"})
+        return
+
+    command = sanitize(raw_command).strip()
     current_role = session.get('role', 'guest')
     user_uid = session.get('uid', 'N/A')
     user_callsign = session.get('callsign', 'N/A')
@@ -218,6 +255,7 @@ def handle_terminal_input(data):
     args = parts[1] if len(parts) > 1 else ""
 
     output = ""
+
 
     if base_command == "login":
         login_parts = args.split(" ")

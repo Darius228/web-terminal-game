@@ -27,6 +27,9 @@ let uptimeSeconds = 0;
 let currentPing = '--';
 let pingIntervalId = null;
 const socket = io();
+let CSRF_TOKEN = null;
+socket.on('csrf_token', function(data){ CSRF_TOKEN = data && data.token; });
+
 const keyPressSounds = [new Audio('/static/audio/key_press_1.mp3'), new Audio('/static/audio/key_press_2.mp3'), new Audio('/static/audio/key_press_3.mp3')];
 const enterSounds = [new Audio('/static/audio/enter_1.mp3'), new Audio('/static/audio/enter_2.mp3'), new Audio('/static/audio/enter_3.mp3'), ];
 const commandDoneSound = new Audio('/static/audio/command_done.mp3');
@@ -206,7 +209,7 @@ function startPingMeasurement() {
     if (pingIntervalId) clearInterval(pingIntervalId);
     pingIntervalId = setInterval(() => {
         window.pingStartTime = Date.now();
-        socket.emit('ping_check');
+        socket.emit('ping_check', { csrf: CSRF_TOKEN });
     }, 3000);
 }
 
@@ -229,6 +232,7 @@ function processCommand() {
         terminalInput.value = '';
     } else {
         socket.emit('terminal_input', {
+            csrf: CSRF_TOKEN,
             command: fullCommand
         });
         terminalInput.value = '';
