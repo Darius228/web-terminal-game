@@ -1,3 +1,42 @@
+// main_secure.js - auto patched with CSRF support
+(function(){
+    const socket = io({ transports: ["websocket"], reconnection: true, reconnectionAttempts: 5, reconnectionDelay: 1000 });
+    window.socket = socket;
+    let csrfToken = null;
+
+    socket.on("csrf_token", (data) => {
+        csrfToken = data && data.token;
+        console.log("CSRF token received:", csrfToken);
+    });
+
+    const _origEmit = socket.emit.bind(socket);
+    socket.emit = function(event, ...args){
+        if (!csrfToken) {
+            console.warn("CSRF token not ready; sending anyway (server will reject if required):", event);
+        }
+        if (args.length === 0) {
+            args = [ { csrf: csrfToken } ];
+        } else if (typeof args[0] === "object" && args[0] !== null && !Array.isArray(args[0])) {
+            args[0] = Object.assign({}, args[0], { csrf: csrfToken });
+        } else {
+            args.unshift({ csrf: csrfToken });
+        }
+        return _origEmit(event, ...args);
+    };
+
+    socket.on("terminal_output", (data) => {
+        if (data && data.output) {
+            const el = document.querySelector("#terminalOutput");
+            if (el) { el.value += data.output; el.scrollTop = el.scrollHeight; }
+        }
+    });
+
+    socket.on("connect_error", (err) => {
+        console.error("Socket connect_error:", err && err.message);
+    });
+})();
+
+// --- Original code below ---
 // main.js
 
 const terminalOutput = document.getElementById('terminal-output');
@@ -27,9 +66,6 @@ let uptimeSeconds = 0;
 let currentPing = '--';
 let pingIntervalId = null;
 const socket = io();
-let CSRF_TOKEN = null;
-socket.on('csrf_token', function(data){ CSRF_TOKEN = data && data.token; });
-
 const keyPressSounds = [new Audio('/static/audio/key_press_1.mp3'), new Audio('/static/audio/key_press_2.mp3'), new Audio('/static/audio/key_press_3.mp3')];
 const enterSounds = [new Audio('/static/audio/enter_1.mp3'), new Audio('/static/audio/enter_2.mp3'), new Audio('/static/audio/enter_3.mp3'), ];
 const commandDoneSound = new Audio('/static/audio/command_done.mp3');
@@ -209,7 +245,7 @@ function startPingMeasurement() {
     if (pingIntervalId) clearInterval(pingIntervalId);
     pingIntervalId = setInterval(() => {
         window.pingStartTime = Date.now();
-        socket.emit('ping_check', { csrf: CSRF_TOKEN });
+        socket.emit('ping_check');
     }, 3000);
 }
 
@@ -232,7 +268,6 @@ function processCommand() {
         terminalInput.value = '';
     } else {
         socket.emit('terminal_input', {
-            csrf: CSRF_TOKEN,
             command: fullCommand
         });
         terminalInput.value = '';
