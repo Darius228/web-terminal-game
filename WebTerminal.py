@@ -1,582 +1,721 @@
-# WebTerminal_secure.py
-# Полностью исправленная, самодостаточная версия с CSRF, проверкой ролей, rate limiting
-# и интеграцией с google_sheets_api (как в твоём файле). Готово для Gunicorn/Render.
+# WebTerminal.py
 
 import os
 import json
-import time
 import secrets
 from datetime import datetime, timedelta
-from functools import wraps
-
-import bleach
 from flask import Flask, render_template, request, session
-from flask_socketio import SocketIO, emit, disconnect
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
-# Локальный модуль из твоего проекта
+# Импортируем наш модуль для работы с Google Таблицами
 import google_sheets_api
 
-# =========================
-# Константы и глобальные структуры
-# =========================
+# --- Константы для названий листов ---
 LOG_SHEET_NAME = "Логи"
-USERS_SHEET = "Пользователи"
-CONTRACTS_SHEET = "Контракты"
-CLIENT_REQUESTS_SHEET = "Запросы Клиентов"
-MESSAGES_SHEET = "Сообщения"
+MESSAGES_SHEET_NAME = "Сообщения"
 
-MAX_MESSAGE_LENGTH = 2000
-MAX_LOGIN_ATTEMPTS = 5
-LOGIN_ATTEMPT_WINDOW = 900  # 15 минут
-EVENTS_PER_MINUTE = 60      # защита от спама событий
-MESSAGE_MIN_INTERVAL = 0.5  # сек
-
+# --- Глобальные переменные и константы ---
 ROLE_PERMISSIONS = {
-    "guest":       ["help", "login", "clear", "ping"],
-    "operative":   ["help", "ping", "sendmsg", "msghistory", "contracts",
-                    "view_orders", "view_contract", "exit", "clear"],
-    "commander":   ["help", "ping", "sendmsg", "msghistory", "contracts",
-                    "assign_contract", "view_users_squad", "setchannel",
-                    "view_contract", "exit", "clear"],
-    "client":      ["help", "ping", "create_request", "view_my_requests", "exit", "clear"],
-    "syndicate":   ["help", "ping", "sendmsg", "resetkeys", "viewkeys",
-                    "register_user", "unregister_user", "view_users", "viewrequests",
-                    "acceptrequest", "declinerequest", "contracts", "exit", "clear",
-                    "syndicate_assign"]
+    "guest": ["help", "login", "clear", "ping"],
+    "operative": ["help", "ping", "sendmsg", "msghistory", "contracts", "view_orders", "view_contract", "exit", "clear"],
+    "commander": ["help", "ping", "sendmsg", "msghistory", "contracts", "assign_contract", "view_users_squad", "setchannel", "view_contract", "exit", "clear"],
+    "client": ["help", "ping", "create_request", "view_my_requests", "exit", "clear"],
+    "syndicate": [
+        "help", "ping", "sendmsg", "resetkeys", "viewkeys", "register_user",
+        "unregister_user", "view_users", "viewrequests", "acceptrequest",
+        "declinerequest", "contracts", "exit", "clear", "syndicate_assign"
+    ]
 }
+COMMAND_DESCRIPTIONS = {
+    "help": "Отображает список доступных команд.",
+    "login": "Вход в систему. login <UID> <ключ>",
+    "clear": "Очищает окно терминала.",
+    "ping": "Проверяет соединение.",
+    "sendmsg": "Отправляет сообщение. sendmsg <сообщение> | sendmsg <UID> <сообщение>",
+    "msghistory": "Показывает последние 20 сообщений в чате вашего отряда.",
+    "contracts": "Просмотр всех активных и назначенных контрактов.",
+    "view_contract": "Просмотр деталей контракта. view_contract <ID_контракта>",
+    "view_orders": "Просмотр ваших контрактов.",
+    "assign_contract": "Назначить контракт оперативнику (или себе). assign_contract <ID_контракта> <UID>",
+    "view_users_squad": "Просмотр оперативников в отряде.",
+    "setchannel": "Установить новую частоту отряда. setchannel <частота>",
+    "create_request": "Создать запрос. create_request <ID_Discord> <Причина> <Текст запроса>",
+    "view_my_requests": "Просмотр ваших запросов.",
+    "resetkeys": "Сбросить ключи доступа. resetkeys <роль>",
+    "viewkeys": "Просмотр текущих ключей доступа.",
+    "register_user": "Зарегистрировать пользователя. register_user <ключ> <UID> <позывной> <отряд>",
+    "unregister_user": "Деактивировать пользователя. unregister_user <UID>",
+    "view_users": "Просмотр всех пользователей.",
+    "viewrequests": "Просмотр запросов клиентов.",
+    "acceptrequest": "Принять запрос. acceptrequest <ID> <название> <описание> <награда>",
+    "declinerequest": "Отклонить запрос. declinerequest <ID>",
+    "exit": "Выход из сессии.",
+    "syndicate_assign": "Назначить контракт отряду(ам). syndicate_assign <ID> <alpha|beta|alpha,beta>"
+}
+ACCESS_KEYS = {}
+KEY_TO_ROLE = {}
+REGISTERED_USERS = {}
+CONTRACTS = []
+PENDING_REQUESTS = []
+SQUAD_FREQUENCIES = {
+    "alpha": "142.7 МГц",
+    "beta": "148.8 МГц"
+}
+dossiers = {}
+active_operatives = {}
+active_users = {}
 
-# Память процесса (может быть заменена кэшем/БД)
-REGISTERED_USERS = {}   # uid -> dict(row)
-CONTRACTS = []          # list of dicts
-PENDING_REQUESTS = []   # list of dicts
+def log_terminal_event(event_type, user_info, message):
+    """
+    Формирует запись лога и отправляет ее в Google Таблицу.
+    Также выводит лог в консоль сервера для отладки в реальном времени.
+    """
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    console_log_entry = f"[{timestamp}] [{event_type.upper()}] [Пользователь: {user_info}] {message}"
+    print(console_log_entry)
+    sheet_row_data = [timestamp, event_type.upper(), user_info, message]
+    google_sheets_api.append_row(LOG_SHEET_NAME, sheet_row_data)
 
-# Rate limiting storage
-login_attempts = {}     # ip -> [timestamps]
-sid_event_times = {}    # sid -> [timestamps]
-message_timestamps = {} # uid -> last_timestamp
+def log_message_to_sheet(sender_uid, sender_callsign, sender_squad, recipient_type, recipient_id, message_text):
+    """Сохраняет отправленное сообщение в лист 'Сообщения'."""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    message_row = [
+        timestamp,
+        sender_uid,
+        sender_callsign,
+        sender_squad,
+        recipient_type,
+        recipient_id,
+        message_text
+    ]
+    google_sheets_api.append_row(MESSAGES_SHEET_NAME, message_row)
 
-# =========================
-# Flask/SocketIO
-# =========================
-app = Flask(__name__)
-_secret = os.environ.get("FLASK_SECRET_KEY")
-if not _secret:
-    raise RuntimeError("FLASK_SECRET_KEY обязателен для запуска приложения")
-app.config["SECRET_KEY"] = _secret
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SECURE"] = True
-app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
-app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 
-socketio = SocketIO(app, cors_allowed_origins=[], logger=False, engineio_logger=False)
-
-# =========================
-# Утилиты безопасности
-# =========================
-def sanitize_input(data: str) -> str:
-    return bleach.clean(str(data), tags=[], attributes={}, strip=True)
-
-def rate_limit_login(ip, limit=MAX_LOGIN_ATTEMPTS, window=LOGIN_ATTEMPT_WINDOW):
-    now = time.time()
-    login_attempts.setdefault(ip, [])
-    login_attempts[ip] = [t for t in login_attempts[ip] if now - t < window]
-    if len(login_attempts[ip]) >= limit:
-        return False
-    login_attempts[ip].append(now)
-    return True
-
-def rate_limit_events(sid, limit=EVENTS_PER_MINUTE, window=60):
-    now = time.time()
-    sid_event_times.setdefault(sid, [])
-    sid_event_times[sid] = [t for t in sid_event_times[sid] if now - t < window]
-    if len(sid_event_times[sid]) >= limit:
-        return False
-    sid_event_times[sid].append(now)
-    return True
-
-def message_rate_limit(uid, min_interval=MESSAGE_MIN_INTERVAL):
-    now = time.time()
-    last_time = message_timestamps.get(uid, 0)
-    if now - last_time < min_interval:
-        return False
-    message_timestamps[uid] = now
-    return True
-
-def generate_csrf_token():
-    token = secrets.token_hex(16)
-    session["csrf_token"] = token
-    return token
-
-def check_csrf_from(data: dict | None):
-    token = None
-    if isinstance(data, dict):
-        token = data.get("csrf")
-    if not token:
-        token = request.args.get("csrf") or request.headers.get("X-CSRF-Token")
-    return token and token == session.get("csrf_token")
-
-def require_csrf(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        # Глобальный rate-limit по событиям
-        if not rate_limit_events(request.sid):
-            emit("terminal_output", {"output": "⚠️ Слишком много событий. Подождите немного.\n"})
-            return
-        # CSRF
-        data_arg = args[0] if args else {}
-        if not check_csrf_from(data_arg if isinstance(data_arg, dict) else {}):
-            emit("terminal_output", {"output": "❌ Неверный CSRF-токен. Перезагрузите страницу.\n"})
-            disconnect()
-            return
-        return f(*args, **kwargs)
-    return wrapper
-
-def require_auth(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        if not session.get("uid") or session.get("role") in (None, "guest"):
-            emit("terminal_output", {"output": "❌ Требуется авторизация.\n"})
-            disconnect()
-            return
-        return f(*args, **kwargs)
-    return decorated
-
-def require_role(event_name: str):
-    def decorator(f):
-        @wraps(f)
-        def wrapper(*args, **kwargs):
-            role = session.get("role", "guest")
-            allowed = ROLE_PERMISSIONS.get(role, [])
-            if event_name not in allowed:
-                emit("terminal_output", {"output": f"🚫 Недостаточно прав для команды '{event_name}'.\n"})
-                return
-            return f(*args, **kwargs)
-        return wrapper
-    return decorator
-
-def log_terminal_event(event_type, message, extra=None):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    info = {
-        "uid": session.get("uid"),
-        "role": session.get("role"),
-        "ip": request.remote_addr
-    }
-    if extra:
-        info.update(extra)
-    safe_info = json.dumps(info, ensure_ascii=False)
-    print(f"[{timestamp}] [{event_type}] {safe_info} :: {message}")
-    # Убедимся, что Sheets инициализирован
-    google_sheets_api.init_google_sheets()
-    try:
-        google_sheets_api.append_row(LOG_SHEET_NAME, [timestamp, event_type, safe_info, str(message)])
-    except Exception:
-        pass
-
-# =========================
-# Загрузка данных из Google Sheets
-# =========================
-def load_data_from_sheets():
-    global REGISTERED_USERS, CONTRACTS, PENDING_REQUESTS
-    if not google_sheets_api.init_google_sheets():
-        print("⚠️ Google Sheets не инициализирован — продолжаем с пустыми данными (dev режим).")
-        return
-
-    try:
-        users_data = google_sheets_api.get_all_records(USERS_SHEET)
-        REGISTERED_USERS = {str(u.get("UID")): u for u in users_data if u.get("UID")}
-    except Exception as e:
-        print("Ошибка загрузки пользователей:", e)
-
-    try:
-        CONTRACTS = []
-        for c in google_sheets_api.get_all_records(CONTRACTS_SHEET):
-            try:
-                c["ID"] = int(c.get("ID"))
-                CONTRACTS.append(c)
-            except Exception:
-                continue
-    except Exception as e:
-        print("Ошибка загрузки контрактов:", e)
-
-    try:
-        PENDING_REQUESTS = []
-        for r in google_sheets_api.get_all_records(CLIENT_REQUESTS_SHEET):
-            try:
-                r["ID Запроса"] = int(r.get("ID Запроса"))
-                PENDING_REQUESTS.append(r)
-            except Exception:
-                continue
-    except Exception as e:
-        print("Ошибка загрузки запросов:", e)
-
-# =========================
-# HTTP
-# =========================
-@app.route("/")
-def index():
-    # Если есть шаблон — отрендерится. Если нет — просто скажем, что сервер работает.
-    try:
-        return render_template("index.html")
-    except Exception:
-        return "WebTerminal backend is running.", 200
-
-# =========================
-# Socket.IO события
-# =========================
-@socketio.on("connect")
-def handle_connect(auth=None):
-    # Инициализируем Sheets (мягко)
-    google_sheets_api.init_google_sheets()
-
-    # Гостевая сессия до логина
-    session.setdefault("role", "guest")
-    session.setdefault("uid", None)
-
-    # Генерация CSRF и отправка на клиент
-    token = generate_csrf_token()
-    emit("csrf_token", {"token": token})
-    emit("update_ui_state", {"role": session["role"], "show_ui_panel": False})
-    log_terminal_event("connect", "client connected")
-
-@socketio.on("disconnect")
-def handle_disconnect():
-    log_terminal_event("disconnect", "client disconnected")
-
-# ---------- Аутентификация ----------
-@socketio.on("login")
-@require_csrf
-def login(data):
-    ip = request.remote_addr
-    if not rate_limit_login(ip):
-        emit("login_failure", {"message": "Слишком много попыток. Попробуйте позже."})
-        return
-
-    uid = sanitize_input(str(data.get("uid", "")).strip())
-    key = sanitize_input(str(data.get("key", "")).strip())
-
-    load_data_from_sheets()
-    user = REGISTERED_USERS.get(uid)
-
-    if user and str(user.get("Ключ Доступа")) == key:
-        session["uid"] = uid
-        session["role"] = user.get("Роль", "guest")
-        emit("update_ui_state", {"role": session["role"], "show_ui_panel": True})
-        emit("terminal_output", {"output": "✅ Добро пожаловать!\n"})
-        log_terminal_event("login", f"user {uid} authenticated")
+def load_access_keys():
+    """Загружает ключи доступа из переменной окружения ACCESS_KEYS_JSON."""
+    global ACCESS_KEYS, KEY_TO_ROLE
+    keys_json_str = os.environ.get('ACCESS_KEYS_JSON')
+    if not keys_json_str:
+        print("❌ Ошибка: Переменная окружения 'ACCESS_KEYS_JSON' не найдена.")
+        ACCESS_KEYS = {}
     else:
-        emit("login_failure", {"message": "Неверный UID или ключ."})
-        log_terminal_event("login_fail", f"user {uid} failed auth")
+        try:
+            ACCESS_KEYS = json.loads(keys_json_str)
+        except json.JSONDecodeError:
+            print("❌ Ошибка: Неверный формат JSON в переменной окружения 'ACCESS_KEYS_JSON'.")
+            raise ValueError("Invalid ACCESS_KEYS_JSON format")
+    KEY_TO_ROLE.clear()
+    for role, keys_list in ACCESS_KEYS.items():
+        for key in keys_list:
+            KEY_TO_ROLE[key] = role
 
-@socketio.on("exit")
-@require_csrf
-@require_auth
-def logout(data=None):
-    uid = session.get("uid")
-    role = session.get("role")
-    session["uid"] = None
-    session["role"] = "guest"
-    emit("update_ui_state", {"role": "guest", "show_ui_panel": False})
-    emit("terminal_output", {"output": "👋 Вы вышли из системы.\n"})
-    log_terminal_event("logout", f"{uid}/{role} logged out")
+def load_data_from_sheets():
+    """Загружает все необходимые данные из Google Таблиц в кэш."""
+    global REGISTERED_USERS, CONTRACTS, PENDING_REQUESTS
+    print("Загрузка данных из Google Таблиц...")
+    users_data = google_sheets_api.get_all_records('Пользователи')
+    REGISTERED_USERS = {str(user.get('UID')): user for user in users_data if user.get('UID')}
+    CONTRACTS.clear()
+    contracts_data = google_sheets_api.get_all_records('Контракты')
+    for contract in contracts_data:
+        try:
+            contract['ID'] = int(contract.get('ID'))
+            CONTRACTS.append(contract)
+        except (ValueError, TypeError):
+            continue
+    PENDING_REQUESTS.clear()
+    requests_data = google_sheets_api.get_all_records('Запросы Клиентов')
+    for req in requests_data:
+        try:
+            req['ID Запроса'] = int(req.get('ID Запроса'))
+            PENDING_REQUESTS.append(req)
+        except (ValueError, TypeError):
+            continue
+    print("Данные успешно загружены.")
 
-# ---------- Общие команды ----------
-@socketio.on("help")
-@require_csrf
-def help_event(data=None):
-    role = session.get("role", "guest")
-    allowed = ROLE_PERMISSIONS.get(role, [])
-    out = "Доступные команды для роли '{}':\n - ".format(role) + "\n - ".join(allowed) + "\n"
-    emit("terminal_output", {"output": out})
+app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_very_temporary_secret_key_for_dev_only')
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
+socketio = SocketIO(app)
 
-@socketio.on("clear")
-@require_csrf
-def clear_event(data=None):
-    emit("terminal_output", {"output": "\n" * 50})
+if not google_sheets_api.init_google_sheets():
+    print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать Google Таблицы.")
+load_access_keys()
+load_data_from_sheets()
 
-@socketio.on("ping")
-@require_csrf
-def ping_event(data=None):
-    emit("terminal_output", {"output": "🏓 pong\n"})
+@app.route('/')
+def index():
+    return render_template('index.html')
 
-# ---------- Сообщения ----------
-@socketio.on("sendmsg")
-@require_csrf
-@require_auth
-@require_role("sendmsg")
-def handle_sendmsg(data):
-    uid = session.get("uid")
-    if not message_rate_limit(uid):
-        emit("terminal_output", {"output": "⏳ Подождите перед отправкой следующего сообщения.\n"})
-        return
+@socketio.on('connect')
+def handle_connect():
+    session['role'] = 'guest'
+    session['uid'] = None
+    session['callsign'] = None
+    session['squad'] = None
+    active_users[request.sid] = {'uid': None, 'callsign': None, 'role': 'guest', 'squad': None}
+    emit('update_ui_state', {'role': 'guest', 'show_ui_panel': False, 'squad': None})
+    log_terminal_event("connection", f"SID:{request.sid}", "Новое подключение.")
 
-    msg = sanitize_input(data.get("message", ""))[:MAX_MESSAGE_LENGTH]
-    if not msg.strip():
-        return
+@socketio.on('disconnect')
+def handle_disconnect():
+    uid_disconnected = session.get('uid', 'N/A')
+    callsign_disconnected = session.get('callsign', 'N/A')
+    if request.sid in active_operatives:
+        del active_operatives[request.sid]
+    if request.sid in active_users:
+        del active_users[request.sid]
+    log_terminal_event("disconnection", f"UID:{uid_disconnected}, Callsign:{callsign_disconnected}, SID:{request.sid}", "Пользователь отключился.")
 
-    # Лог в таблицу (если есть)
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        google_sheets_api.append_row(MESSAGES_SHEET, [timestamp, uid, msg])
-    except Exception:
-        pass
-
-    emit("terminal_output", {"output": f"💬 {uid}: {msg}\n"}, broadcast=True)
-    log_terminal_event("sendmsg", msg, extra={"uid": uid})
-
-@socketio.on("msghistory")
-@require_csrf
-@require_auth
-@require_role("msghistory")
-def msghistory_event(data=None):
-    # Вывод последних N сообщений (упрощённо)
-    out_lines = []
-    try:
-        records = google_sheets_api.get_all_records(MESSAGES_SHEET)
-        for r in records[-20:]:
-            out_lines.append(f"{r.get('timestamp', '')} {r.get('uid', '')}: {r.get('message', '')}")
-    except Exception:
-        out_lines.append("⚠️ История сообщений недоступна.")
-    emit("terminal_output", {"output": "\n".join(out_lines) + "\n"})
-
-# ---------- Контракты/заказы ----------
-@socketio.on("contracts")
-@require_csrf
-@require_auth
-@require_role("contracts")
-def contracts_event(data=None):
+@socketio.on('login')
+def login(data):
+    uid = str(data.get('uid'))
+    key = data.get('key')
+    user_info = f"UID: {uid}, Key: {key}"
     load_data_from_sheets()
-    if not CONTRACTS:
-        emit("terminal_output", {"output": "ℹ️ Нет контрактов.\n"})
+    if uid in REGISTERED_USERS and REGISTERED_USERS[uid].get("Ключ Доступа") == key:
+        session['uid'] = uid
+        session['role'] = REGISTERED_USERS[uid].get("Роль")
+        session['callsign'] = REGISTERED_USERS[uid].get("Позывной")
+        session['squad'] = REGISTERED_USERS[uid].get("Отряд")
+        session.permanent = True
+        active_users[request.sid] = {'uid': session['uid'], 'callsign': session['callsign'], 'role': session['role'], 'squad': session['squad']}
+        if session['role'] in ["operative", "commander"]:
+            active_operatives[request.sid] = {'uid': session['uid'], 'callsign': session['callsign'], 'squad': session['squad']}
+            if session['squad'] and session['squad'].lower() != 'none':
+                join_room(session['squad'])
+        if session['role'] == "syndicate":
+            join_room("syndicate_room")
+        log_terminal_event("login_success", user_info, f"Пользователь '{session['callsign']}' успешно вошел как {session['role'].upper()}.")
+        welcome_message = f"✅ Добро пожаловать, {session['callsign']}! Вы вошли как {session['role'].upper()}.\n"
+        emit('terminal_output', {'output': welcome_message})
+        ui_data = {'role': session['role'], 'callsign': session['callsign'], 'squad': session['squad'], 'show_ui_panel': True}
+        if session['role'] == 'syndicate':
+            ui_data['squad_frequencies'] = SQUAD_FREQUENCIES
+            ui_data['channel_frequency'] = "Н/Д"
+        else:
+            ui_data['channel_frequency'] = SQUAD_FREQUENCIES.get(session.get('squad'), '--:--')
+        emit('update_ui_state', ui_data, room=request.sid)
         return
-    lines = ["📄 Контракты:"]
-    for c in CONTRACTS[:50]:
-        lines.append(f"ID={c.get('ID')} | {c.get('Название','')} | Статус={c.get('Статус','')}")
-    emit("terminal_output", {"output": "\n".join(lines) + "\n"})
+    log_terminal_event("login_failure", user_info, "Попытка входа не удалась: неверный UID или ключ доступа.")
+    emit('login_failure', {'message': "❌ Ошибка: Неверный UID или ключ доступа. Повторите попытку."}, room=request.sid)
 
-@socketio.on("view_contract")
-@require_csrf
-@require_auth
-@require_role("view_contract")
-def view_contract_event(data):
-    cid = str(data.get("contract_id", "")).strip()
-    load_data_from_sheets()
-    for c in CONTRACTS:
-        if str(c.get("ID")) == cid:
-            emit("terminal_output", {"output": json.dumps(c, ensure_ascii=False, indent=2) + "\n"})
+@socketio.on('terminal_input')
+def handle_terminal_input(data):
+    global ROLE_PERMISSIONS, COMMAND_DESCRIPTIONS, SQUAD_FREQUENCIES, ACCESS_KEYS, KEY_TO_ROLE
+
+    command = data.get('command', '').strip()
+    current_role = session.get('role', 'guest')
+    user_uid = session.get('uid', 'N/A')
+    user_callsign = session.get('callsign', 'N/A')
+    user_squad = session.get('squad', 'None')
+    user_info = f"UID:{user_uid}, Callsign:{user_callsign}, Role:{current_role}"
+
+    log_terminal_event("command_input", user_info, f"Команда: '{command}'")
+
+    parts = command.split(" ", 1)
+    base_command = parts[0].lower()
+    args = parts[1] if len(parts) > 1 else ""
+
+    output = ""
+
+    if base_command == "login":
+        login_parts = args.split(" ")
+        if len(login_parts) == 2:
+            uid, key = login_parts
+            login({'uid': uid, 'key': key})
             return
-    emit("terminal_output", {"output": "❓ Контракт не найден.\n"})
-
-@socketio.on("assign_contract")
-@require_csrf
-@require_auth
-@require_role("assign_contract")
-def assign_contract_event(data):
-    cid = str(data.get("contract_id", "")).strip()
-    assignee = sanitize_input(data.get("assignee", ""))
-    # Обновим строку в таблице (если есть поле 'Назначен')
-    try:
-        ok = google_sheets_api.update_row_by_key(CONTRACTS_SHEET, "ID", cid, {"Назначен": assignee})
-        emit("terminal_output", {"output": ("✅ Назначено.\n" if ok else "⚠️ Не удалось назначить.\n")})
-        log_terminal_event("assign_contract", f"cid={cid} -> {assignee}")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка при назначении.\n"})
-
-@socketio.on("view_orders")
-@require_csrf
-@require_auth
-@require_role("view_orders")
-def view_orders_event(data=None):
-    # В твоём коде могла быть своя логика — здесь просто отобразим контракты со статусом 'Открыт'
-    load_data_from_sheets()
-    lines = ["📦 Открытые заказы:"]
-    for c in CONTRACTS:
-        if str(c.get("Статус", "")).lower() in ("open", "открыт", "в работе"):
-            lines.append(f"- ID {c.get('ID')} :: {c.get('Название','')}")
-    if len(lines) == 1:
-        lines.append("Нет открытых заказов.")
-    emit("terminal_output", {"output": "\n".join(lines) + "\n"})
-
-@socketio.on("view_users_squad")
-@require_csrf
-@require_auth
-@require_role("view_users_squad")
-def view_users_squad_event(data=None):
-    # Упрощённый пример: выведем список пользователей из таблицы
-    load_data_from_sheets()
-    lines = ["👥 Пользователи:"]
-    for uid, row in list(REGISTERED_USERS.items())[:100]:
-        lines.append(f"- {uid} :: {row.get('Роль', 'unknown')} :: {row.get('Отряд', 'n/a')}")
-    emit("terminal_output", {"output": "\n".join(lines) + "\n"})
-
-@socketio.on("setchannel")
-@require_csrf
-@require_auth
-@require_role("setchannel")
-def setchannel_event(data):
-    # Место под твою бизнес-логику; здесь просто подтверждаем
-    ch = sanitize_input(data.get("channel", ""))
-    emit("terminal_output", {"output": f"📡 Канал связи установлен: {ch}\n"})
-
-# ---------- Клиенты ----------
-@socketio.on("create_request")
-@require_csrf
-@require_auth
-@require_role("create_request")
-def create_request_event(data):
-    uid = session.get("uid")
-    title = sanitize_input(data.get("title", ""))
-    body = sanitize_input(data.get("body", ""))
-    if not title:
-        emit("terminal_output", {"output": "⚠️ Укажите заголовок.\n"})
-        return
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    try:
-        ok = google_sheets_api.append_row(CLIENT_REQUESTS_SHEET, [timestamp, uid, title, body, "Новый"])
-        emit("terminal_output", {"output": ("✅ Запрос создан.\n" if ok else "⚠️ Не удалось создать запрос.\n")})
-        log_terminal_event("create_request", f"{title}")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка при создании запроса.\n"})
-
-@socketio.on("view_my_requests")
-@require_csrf
-@require_auth
-@require_role("view_my_requests")
-def view_my_requests_event(data=None):
-    uid = session.get("uid")
-    try:
-        rows = google_sheets_api.get_all_records(CLIENT_REQUESTS_SHEET)
-        mine = [r for r in rows if str(r.get("UID")) == str(uid)]
-        if not mine:
-            emit("terminal_output", {"output": "ℹ️ У вас нет запросов.\n"})
+        else:
+            output = "ℹ️ Использование: login <UID> <ключ_доступа>\n"
+            emit('terminal_output', {'output': output + '\n'}, room=request.sid)
             return
-        lines = ["🗂 Ваши запросы:"]
-        for r in mine[-50:]:
-            lines.append(f"#{r.get('ID Запроса','?')} :: {r.get('Заголовок','')} :: {r.get('Статус','')}")
-        emit("terminal_output", {"output": "\n".join(lines) + "\n"})
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка получения запросов.\n"})
 
-# ---------- Синдикат/админ ----------
-@socketio.on("register_user")
-@require_csrf
-@require_auth
-@require_role("register_user")
-def register_user_event(data):
-    uid = sanitize_input(data.get("uid", ""))
-    role = sanitize_input(data.get("role", "guest"))
-    key = sanitize_input(data.get("key", ""))
-    try:
-        ok = google_sheets_api.append_row(USERS_SHEET, [uid, role, key])
-        emit("terminal_output", {"output": ("✅ Пользователь добавлен.\n" if ok else "⚠️ Не удалось добавить.\n")})
-        log_terminal_event("register_user", f"{uid}/{role}")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка добавления пользователя.\n"})
-
-@socketio.on("unregister_user")
-@require_csrf
-@require_auth
-@require_role("unregister_user")
-def unregister_user_event(data):
-    uid = sanitize_input(data.get("uid", ""))
-    try:
-        ok = google_sheets_api.delete_row_by_key(USERS_SHEET, "UID", uid)
-        emit("terminal_output", {"output": ("✅ Пользователь удалён.\n" if ok else "⚠️ Не найден.\n")})
-        log_terminal_event("unregister_user", f"{uid}")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка удаления пользователя.\n"})
-
-@socketio.on("view_users")
-@require_csrf
-@require_auth
-@require_role("view_users")
-def view_users_event(data=None):
-    load_data_from_sheets()
-    lines = ["👥 Пользователи:"]
-    for uid, row in list(REGISTERED_USERS.items())[:200]:
-        lines.append(f"- {uid} :: {row.get('Роль','?')}")
-    emit("terminal_output", {"output": "\n".join(lines) + "\n"})
-
-@socketio.on("viewrequests")
-@require_csrf
-@require_auth
-@require_role("viewrequests")
-def viewrequests_event(data=None):
-    load_data_from_sheets()
-    if not PENDING_REQUESTS:
-        emit("terminal_output", {"output": "ℹ️ Нет клиентских запросов.\n"})
+    if base_command not in ROLE_PERMISSIONS.get(current_role, []):
+        output = (f"❓ Неизвестная команда: '{base_command}' или недоступна для вашей роли ({current_role}).\n"
+                  "Введите 'help' для списка команд.\n")
+    elif base_command == "help":
+        output = "--- 📖 СПИСОК ДОСТУПНЫХ КОМАНД ---\n"
+        for cmd in sorted(ROLE_PERMISSIONS.get(current_role, [])):
+            description = COMMAND_DESCRIPTIONS.get(cmd, "Нет описания.")
+            output += f"- {cmd}: {description}\n"
+        output += "---------------------------------\n"
+    elif base_command == "clear":
+        emit('terminal_output', {'output': "<CLEAR_TERMINAL>\n"}, room=request.sid)
         return
-    lines = ["📮 Клиентские запросы:"]
-    for r in PENDING_REQUESTS[:100]:
-        lines.append(f"#{r.get('ID Запроса','?')} :: {r.get('UID','')} :: {r.get('Заголовок','')} :: {r.get('Статус','')}")
-    emit("terminal_output", {"output": "\n".join(lines) + "\n"})
+    elif base_command == "ping":
+        output = "📡 Пинг: 42мс (стабильно)\n"
 
-@socketio.on("acceptrequest")
-@require_csrf
-@require_auth
-@require_role("acceptrequest")
-def acceptrequest_event(data):
-    rid = str(data.get("request_id", "")).strip()
-    try:
-        ok = google_sheets_api.update_row_by_key(CLIENT_REQUESTS_SHEET, "ID Запроса", rid, {"Статус": "Принят"})
-        emit("terminal_output", {"output": ("✅ Запрос принят.\n" if ok else "⚠️ Не найден запрос.\n")})
-        log_terminal_event("acceptrequest", f"request {rid} accepted")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка подтверждения.\n"})
+    elif base_command == "sendmsg":
+        if current_role not in ["operative", "commander", "syndicate"]:
+            output = "❌ Ошибка: Команда 'sendmsg' доступна только для Оперативников, Командиров и Синдиката.\n"
+        elif not args:
+            output = "ℹ️ Использование: sendmsg <сообщение> ИЛИ sendmsg <UID_получателя> <сообщение>\n"
+        else:
+            msg_parts = args.split(" ", 1)
+            target_id_or_msg = msg_parts[0]
+            message_text_if_private = msg_parts[1] if len(msg_parts) > 1 else ""
+            load_data_from_sheets()
 
-@socketio.on("declinerequest")
-@require_csrf
-@require_auth
-@require_role("declinerequest")
-def declinerequest_event(data):
-    rid = str(data.get("request_id", "")).strip()
-    try:
-        ok = google_sheets_api.update_row_by_key(CLIENT_REQUESTS_SHEET, "ID Запроса", rid, {"Статус": "Отклонён"})
-        emit("terminal_output", {"output": ("✅ Запрос отклонён.\n" if ok else "⚠️ Не найден запрос.\n")})
-        log_terminal_event("declinerequest", f"request {rid} declined")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка отклонения.\n"})
+            if message_text_if_private and target_id_or_msg in REGISTERED_USERS:
+                target_uid = target_id_or_msg
+                target_callsign = REGISTERED_USERS[target_uid]['Позывной']
+                target_sid = next((sid for sid, user_data in active_users.items() if user_data.get('uid') == target_uid), None)
+                if target_sid:
+                    log_message_to_sheet(user_uid, user_callsign, user_squad, 'private', target_uid, message_text_if_private)
+                    emit('terminal_output', {'output': f"💬 [ЛИЧНО] От {user_callsign}: {message_text_if_private}\n"}, room=target_sid)
+                    output = f"✅ Сообщение отправлено '{target_callsign}'.\n"
+                    log_terminal_event("message_sent", user_info, f"Личное сообщение для {target_callsign} (UID:{target_uid}): '{message_text_if_private}'")
+                else:
+                    output = f"❌ Ошибка: Пользователь '{target_callsign}' (UID: {target_uid}) не в сети.\n"
+            else:
+                full_message = args
+                if current_role == "syndicate":
+                    log_message_to_sheet(user_uid, user_callsign, user_squad, 'global', 'all', full_message)
+                    emit('terminal_output', {'output': f"📢 [ГЛОБАЛ] Синдикат {user_callsign}: {full_message}\n"}, broadcast=True)
+                    output = "✅ Глобальное сообщение отправлено.\n"
+                    log_terminal_event("message_sent", user_info, f"Глобальное сообщение: '{full_message}'")
+                elif user_squad and user_squad.lower() != 'none':
+                    log_message_to_sheet(user_uid, user_callsign, user_squad, 'squad', user_squad, full_message)
+                    message_to_send = f"💬 [{user_squad.upper()}] {user_callsign}: {full_message}\n"
+                    emit('terminal_output', {'output': message_to_send}, room=user_squad)
+                    output = f"✅ Сообщение отправлено в отряд {user_squad.upper()}.\n"
+                    log_terminal_event("message_sent", user_info, f"Сообщение в отряд {user_squad}: '{full_message}'")
+                else:
+                    output = "❌ Ошибка: Не указан получатель или вы не состоите в отряде.\n"
 
-@socketio.on("viewkeys")
-@require_csrf
-@require_auth
-@require_role("viewkeys")
-def viewkeys_event(data=None):
-    # Для безопасности не показываем ключи полностью
-    load_data_from_sheets()
-    lines = ["🔑 Ключи доступа (замаскированы):"]
-    for uid, row in list(REGISTERED_USERS.items())[:200]:
-        k = str(row.get("Ключ Доступа", ""))
-        masked = (k[:2] + "•••" + k[-2:]) if len(k) >= 4 else "•••"
-        lines.append(f"- {uid}: {masked}")
-    emit("terminal_output", {"output": "\n".join(lines) + "\n"})
+    elif base_command == "msghistory" and current_role in ["operative", "commander"]:
+        if not user_squad or user_squad.lower() == 'none':
+            output = "❌ Ошибка: Вы не состоите в отряде, чтобы просматривать историю сообщений.\n"
+        else:
+            output = f"--- 📜 ИСТОРИЯ СООБЩЕНИЙ ОТРЯДА: {user_squad.upper()} (последние 20) ---\n"
+            all_messages = google_sheets_api.get_all_records(MESSAGES_SHEET_NAME)
+            
+            squad_messages = [
+                msg for msg in all_messages
+                if msg.get('Recipient_Type') == 'squad' and msg.get('Recipient_ID') == user_squad
+            ]
 
-@socketio.on("resetkeys")
-@require_csrf
-@require_auth
-@require_role("resetkeys")
-def resetkeys_event(data=None):
-    # Пример: просто уведомление (реальную ротацию реализуй по своей логике)
-    emit("terminal_output", {"output": "♻️ Ротация ключей инициирована (демо).\n"})
-    log_terminal_event("resetkeys", "rotation requested")
+            if not squad_messages:
+                output += "  Сообщений пока нет.\n"
+            else:
+                squad_messages.sort(key=lambda x: x.get('Timestamp', ''))
+                recent_messages = squad_messages[-20:]
+                
+                for msg in recent_messages:
+                    ts = msg.get('Timestamp', '----')
+                    sender = msg.get('Sender_Callsign', 'Неизвестный')
+                    text = msg.get('Message_Text', '')
+                    output += f"  [{ts}] {sender}: {text}\n"
 
-@socketio.on("syndicate_assign")
-@require_csrf
-@require_auth
-@require_role("syndicate_assign")
-def syndicate_assign_event(data):
-    user = sanitize_input(data.get("uid", ""))
-    squad = sanitize_input(data.get("squad", ""))
-    try:
-        ok = google_sheets_api.update_row_by_key(USERS_SHEET, "UID", user, {"Отряд": squad})
-        emit("terminal_output", {"output": ("✅ Назначение выполнено.\n" if ok else "⚠️ Пользователь не найден.\n")})
-        log_terminal_event("syndicate_assign", f"{user} -> {squad}")
-    except Exception:
-        emit("terminal_output", {"output": "⚠️ Ошибка назначения.\n"})
+            output += "--------------------------------------------------------\n"
 
-# =========================
-# Запуск локально
-# =========================
-if __name__ == "__main__":
-    load_data_from_sheets()
-    # На Render запуск через gunicorn, поэтому без ssl_context и debug=False
-    socketio.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=False)
+    elif base_command == "exit":
+        if current_role == "guest":
+            output = "ℹ️ Вы уже находитесь в режиме Гостя. Для входа в систему используйте 'login'.\n"
+        else:
+            if session.get('squad') and session['squad'].lower() != 'none':
+                leave_room(session['squad'])
+            if current_role == "syndicate":
+                leave_room("syndicate_room")
+            
+            if request.sid in active_operatives:
+                del active_operatives[request.sid]
+            
+            if request.sid in active_users:
+                active_users[request.sid] = {'uid': None, 'callsign': None, 'role': 'guest', 'squad': None}
+
+            log_terminal_event("logout", user_info, "Выход из системы.")
+            session.clear()
+            session['role'] = 'guest'
+            session['uid'] = None
+            session['callsign'] = None
+            session['squad'] = None
+            output = "🔌 Вы вышли из системы. Роль сброшена до гостя.\n"
+            socketio.emit('update_ui_state', {'role': 'guest', 'show_ui_panel': False}, room=request.sid)
+
+    elif base_command == "resetkeys" and current_role == "syndicate":
+        role_to_reset = args.strip().lower()
+        if role_to_reset == "заказчик":
+            role_to_reset = "client"
+
+        if not role_to_reset or role_to_reset not in ["operative", "commander", "client"]:
+            output = "ℹ️ Использование: resetkeys <operative | commander | client>\n"
+        elif role_to_reset not in ACCESS_KEYS:
+            output = f"❌ Ошибка: Роль '{role_to_reset}' не найдена в системе ключей.\n"
+        else:
+            num_keys = len(ACCESS_KEYS[role_to_reset])
+            if num_keys == 0:
+                output = f"ℹ️ Для роли '{role_to_reset}' не задано количество ключей. Сброс невозможен.\n"
+            else:
+                new_keys_for_role = [secrets.token_hex(4) for _ in range(num_keys)]
+                ACCESS_KEYS[role_to_reset] = new_keys_for_role
+
+                KEY_TO_ROLE.clear()
+                for role, keys_list in ACCESS_KEYS.items():
+                    for key in keys_list:
+                        KEY_TO_ROLE[key] = role
+                
+                output = f"--- 🔑 Сгенерированы новые ключи для роли '{role_to_reset.upper()}'. ---\n"
+                output += "ВНИМАНИЕ: Для применения этих ключей обновите переменную окружения 'ACCESS_KEYS_JSON' и перезапустите приложение.\n"
+                output += f"{role_to_reset.upper()}: {', '.join(new_keys_for_role)}\n"
+                log_terminal_event("syndicate_action", user_info, f"Сгенерированы новые ключи для роли: {role_to_reset}.")
+
+    elif base_command == "viewkeys" and current_role == "syndicate":
+        output = "--- 🔑 ТЕКУЩИЕ АКТИВНЫЕ КЛЮЧИ ДОСТУПА ---\n"
+        for role, keys in ACCESS_KEYS.items():
+            if role == "guest": continue
+            output += f"{role.upper()}: {', '.join(keys)}\n"
+        output += "--------------------------------------\n"
+
+    elif base_command == "register_user" and current_role == "syndicate":
+        reg_parts = args.split(" ", 3)
+        if len(reg_parts) < 4:
+            output = "ℹ️ Использование: register_user <ключ> <UID> <позывной> <отряд|NONE>\n"
+        else:
+            key, uid, callsign, squad_input = reg_parts
+            squad_input = squad_input.lower()
+
+            load_data_from_sheets() 
+
+            key_is_used = any(user.get("Ключ Доступа") == key for user in REGISTERED_USERS.values())
+            
+            if key_is_used:
+                output = f"❌ Ошибка: Ключ '{key}' уже используется другим пользователем.\n"
+            elif uid in REGISTERED_USERS:
+                output = f"❌ Ошибка: Пользователь с UID '{uid}' уже зарегистрирован.\n"
+            else:
+                role_from_key = KEY_TO_ROLE.get(key)
+                if not role_from_key:
+                    output = "❌ Ошибка: Указанный ключ доступа недействителен.\n"
+                else:
+                    squad_to_assign = "None"
+                    if role_from_key in ["operative", "commander"]:
+                        if squad_input not in ["alpha", "beta"]:
+                            output = "❌ Ошибка: Для оперативника/командира отряд должен быть 'alpha' или 'beta'.\n"; emit('terminal_output', {'output': output}); return
+                        squad_to_assign = squad_input
+                        
+                        commander_count = sum(1 for u in REGISTERED_USERS.values() if u.get('Роль') == 'commander' and u.get('Отряд') == squad_to_assign)
+                        if role_from_key == "commander" and commander_count >= 1:
+                            output = f"❌ Ошибка: В отряде '{squad_to_assign}' уже есть Командир.\n"; emit('terminal_output', {'output': output}); return
+
+                    user_data_row = [uid, key, role_from_key, callsign, squad_to_assign]
+                    if google_sheets_api.append_row('Пользователи', user_data_row):
+                        REGISTERED_USERS[uid] = {"UID": uid, "Ключ Доступа": key, "Роль": role_from_key, "Позывной": callsign, "Отряд": squad_to_assign}
+                        output = f"✅ Пользователь '{callsign}' (UID: {uid}) с ролью '{role_from_key.upper()}' зарегистрирован.\n"
+                        if squad_to_assign not in [None, "None", "none"]:
+                            output += f"Привязан к отряду: {squad_to_assign.upper()}.\n"
+                        log_terminal_event("syndicate_action", user_info, f"Зарегистрирован пользователь: UID={uid}, Callsign={callsign}.")
+                    else:
+                        output = "❌ Ошибка: Не удалось зарегистрировать пользователя в Google Таблицах.\n"
+
+    elif base_command == "unregister_user" and current_role == "syndicate":
+        target_uid = args.strip()
+        if not target_uid:
+            output = "ℹ️ Использование: unregister_user <UID>\n"
+        else:
+            load_data_from_sheets()
+            if target_uid not in REGISTERED_USERS:
+                output = f"❌ Ошибка: Пользователь с UID '{target_uid}' не найден.\n"
+            else:
+                callsign_to_remove = REGISTERED_USERS[target_uid].get('Позывной')
+                if google_sheets_api.delete_row_by_key('Пользователи', 'UID', target_uid):
+                    del REGISTERED_USERS[target_uid]
+                    output = f"✅ Пользователь '{callsign_to_remove}' (UID: {target_uid}) успешно деактивирован.\n"
+                    log_terminal_event("syndicate_action", user_info, f"Дерегистрирован пользователь: UID={target_uid}.")
+                else:
+                    output = "❌ Ошибка: Не удалось деактивировать пользователя в Google Таблицах.\n"
+
+    elif base_command == "setchannel" and current_role == "commander":
+        new_frequency = args.strip()
+        user_squad = session.get('squad')
+
+        if not new_frequency:
+            output = "ℹ️ Использование: setchannel <новая_частота>\n"
+        elif not user_squad or user_squad not in SQUAD_FREQUENCIES:
+            output = "❌ Ошибка: Вы не приписаны к отряду, для которого можно сменить частоту.\n"
+        else:
+            SQUAD_FREQUENCIES[user_squad] = new_frequency
+            output = f"✅ Частота для отряда {user_squad.upper()} установлена на {new_frequency}.\n"
+            log_terminal_event("commander_action", user_info, f"Сменил частоту отряда {user_squad} на {new_frequency}")
+
+            for sid, user_data in list(active_users.items()):
+                if user_data.get('squad') == user_squad:
+                    socketio.emit('update_ui_state', {'channel_frequency': new_frequency}, room=sid, namespace='/')
+                    if sid != request.sid:
+                        socketio.emit('terminal_output', {'output': f"📢 КОМАНДИР {session['callsign']} сменил частоту вашего отряда на {new_frequency}.\n"}, room=sid, namespace='/')
+            
+            socketio.emit('update_ui_state', {'squad_frequencies': SQUAD_FREQUENCIES}, room='syndicate_room', namespace='/')
+    
+    elif base_command == "view_users" and current_role == "syndicate":
+        output = "--- 👥 ЗАРЕГИСТРИРОВАННЫЕ ПОЛЬЗОВАТЕЛИ ---\n"
+        load_data_from_sheets() 
+        if REGISTERED_USERS:
+            for uid, user_data in REGISTERED_USERS.items():
+                output += (f"  UID: {user_data.get('UID', 'N/A')}, Позывной: {user_data.get('Позывной', 'N/A')}, "
+                           f"Роль: {user_data.get('Роль', 'N/A').upper()}, Отряд: {user_data.get('Отряд', 'N/A').upper()}\n")
+        else:
+            output += "  Нет зарегистрированных пользователей.\n"
+        output += "---------------------------------------\n"
+    
+    elif base_command == "view_users_squad" and current_role == "commander":
+        output = f"--- 👥 ОПЕРАТИВНИКИ В ОТЯДЕ {session['squad'].upper()} ---\n"
+        load_data_from_sheets()
+        found_operatives = False
+        for uid, user_data in REGISTERED_USERS.items():
+            if user_data.get('Роль') == 'operative' and user_data.get('Отряд') == session['squad']:
+                output += (f"  UID: {user_data.get('UID', 'N/A')}, Позывной: {user_data.get('Позывной', 'N/A')}\n")
+                found_operatives = True
+        if not found_operatives:
+            output += "  Нет оперативников в вашем отряде.\n"
+        output += "---------------------------------------\n"
+
+    elif base_command == "contracts":
+        load_data_from_sheets() 
+        output = "--- 📋 Активные контракты ---\n"
+        found = False
+        user_squad = session.get('squad')
+        for contract in CONTRACTS:
+            status = str(contract.get('Статус', '')).lower()
+            if status not in ["провален", "выполнен", "failed", "completed"]:
+                assignee = contract.get('Назначено', 'None')
+                assignee_display = assignee if assignee != 'None' else "Никому"
+                
+                if assignee != 'None' and assignee not in ['alpha', 'beta', 'alpha,beta'] and current_role != 'syndicate':
+                    assignee_squad = next((u.get('Отряд') for u in REGISTERED_USERS.values() if u.get('Позывной') == assignee), None)
+                    if user_squad and assignee_squad and user_squad != assignee_squad:
+                         assignee_display = "(другой отряд)"
+                         
+                output += f"ID: {contract.get('ID')}, Название: {contract.get('Название')}, Статус: {status.upper()}, Назначен: {assignee_display}\n"
+                found = True
+        if not found:
+            output += "  Нет контрактов в работе.\n"
+        output += "--------------------------\n"
+    
+    elif base_command == "assign_contract" and current_role == "commander":
+        assign_parts = args.split(" ")
+        if len(assign_parts) < 2:
+            output = "ℹ️ Использование: assign_contract <ID_контракта> <UID_оперативника>\n"
+        else:
+            try:
+                contract_id = int(assign_parts[0])
+                target_uid = assign_parts[1]
+                load_data_from_sheets()
+                target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
+                
+                if not target_contract:
+                    output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
+                else:
+                    is_self_assign = (target_uid == session.get('uid'))
+                    target_user_data = REGISTERED_USERS.get(target_uid)
+                    
+                    target_callsign = None
+                    if is_self_assign:
+                        target_callsign = session.get('callsign')
+                    elif target_user_data and target_user_data.get('Роль') == 'operative' and target_user_data.get('Отряд') == session.get('squad'):
+                        target_callsign = target_user_data.get('Позывной')
+                    
+                    if target_callsign:
+                        updates = {'Назначено': target_callsign, 'Статус': 'Назначен'}
+                        if google_sheets_api.update_row_by_key('Контракты', 'ID', contract_id, updates):
+                            output = f"✅ Контракт ID:{contract_id} назначен: {target_callsign}.\n"
+                            log_terminal_event("commander_action", user_info, f"Назначил контракт {contract_id} на {target_uid}")
+                        else:
+                            output = "❌ Ошибка обновления контракта в Google Sheets.\n"
+                    else:
+                        output = f"❌ UID '{target_uid}' не является оперативником вашего отряда или неверный.\n"
+
+            except ValueError:
+                output = "❌ ID контракта должен быть числом.\n"
+
+    elif base_command == "view_orders" and current_role == "operative":
+        output = "--- 📝 ВАШИ НАЗНАЧЕНИЯ ---\n"
+        load_data_from_sheets() 
+        found_orders = False
+        for contract in CONTRACTS:
+            if contract.get('Назначено') == session['callsign']:
+                output += (f"  ID: {contract.get('ID', 'N/A')}, Название: {contract.get('Название', 'N/A')},\n"
+                           f"  Описание: {contract.get('Описание', 'N/A')},\n"
+                           f"  Награда: {contract.get('Награда', 'N/A')}, Статус: {contract.get('Статус', 'N/A')}\n")
+                found_orders = True
+        if not found_orders: output += "  У вас нет текущих назначений.\n"
+        output += "---------------------------\n"
+        
+    elif base_command == "view_contract" and current_role in ["operative", "commander"]:
+        contract_id_str = args.strip()
+        if not contract_id_str:
+            output = "ℹ️ Использование: view_contract <ID_контракта>\n"
+        else:
+            try:
+                contract_id = int(contract_id_str)
+                load_data_from_sheets()
+                target_contract = next((c for c in CONTRACTS if c.get('ID') == contract_id), None)
+
+                if not target_contract:
+                    output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
+                else:
+                    user_squad = session.get('squad')
+                    user_callsign = session.get('callsign')
+                    assignee = str(target_contract.get('Назначено', '')).lower()
+                    
+                    can_view = False
+                    if assignee == user_callsign.lower():
+                        can_view = True
+                    elif user_squad and user_squad in assignee.split(','):
+                        can_view = True
+                    
+                    if not can_view:
+                        output = f"❌ У вас нет доступа к деталям этого контракта (ID: {contract_id}).\n"
+                    else:
+                        output = f"--- 📜 ДЕТАЛИ КОНТРАКТА ID: {target_contract.get('ID')} ---\n"
+                        output += f"  Название: {target_contract.get('Название', 'Н/Д')}\n"
+                        output += f"  Описание: {target_contract.get('Описание', 'Н/Д')}\n"
+                        output += f"  Награда:  {target_contract.get('Награда', 'Н/Д')}\n"
+                        output += f"  Статус:   {target_contract.get('Статус', 'Н/Д').upper()}\n"
+                        output += f"  Назначен: {target_contract.get('Назначено', 'Н/Д')}\n"
+                        output += "--------------------------------------\n"
+                        log_terminal_event("action", user_info, f"Просмотрел детали контракта ID:{contract_id}")
+
+            except ValueError:
+                output = "❌ ID контракта должен быть числом.\n"
+                
+    elif base_command == "create_request" and current_role == "client":
+        req_parts = args.split(" ", 2)
+        if len(req_parts) < 3:
+            output = "ℹ️ Использование: create_request <ID_Discord> <Причина> <Текст запроса>\n"
+        else:
+            discord_id, reason, request_text = req_parts
+            load_data_from_sheets()
+            valid_ids = [req.get('ID Запроса', 0) for req in PENDING_REQUESTS if isinstance(req.get('ID Запроса'), int)]
+            next_request_id = max(valid_ids) + 1 if valid_ids else 1
+            
+            request_data_row = [next_request_id, session['uid'], session['callsign'], discord_id, reason, request_text, 'Новый']
+            
+            if google_sheets_api.append_row('Запросы Клиентов', request_data_row):
+                output = f"✅ Ваш запрос (ID: {next_request_id}) отправлен.\n"
+                log_terminal_event("client_action", user_info, f"Создан запрос ID={next_request_id}")
+                socketio.emit('terminal_output', {'output': f"🔔 Новый запрос от клиента {session['callsign']} (ID: {next_request_id})!\n"}, room="syndicate_room")
+            else:
+                output = "❌ Ошибка создания запроса в Google Sheets.\n"
+    
+    elif base_command == "syndicate_assign" and current_role == "syndicate":
+        assign_parts = args.split(" ")
+        if len(assign_parts) != 2:
+            output = "ℹ️ Использование: syndicate_assign <ID_контракта> <alpha|beta|alpha,beta>\n"
+        else:
+            try:
+                contract_id = int(assign_parts[0])
+                squads_str = assign_parts[1].lower()
+                
+                if not all(s in ["alpha", "beta"] for s in squads_str.split(',')):
+                    output = "❌ Неверное имя отряда. Допустимы: alpha, beta, alpha,beta.\n"
+                else:
+                    load_data_from_sheets()
+                    if any(c.get('ID') == contract_id for c in CONTRACTS):
+                        updates = {'Назначено': squads_str, 'Статус': 'Назначен'}
+                        if google_sheets_api.update_row_by_key('Контракты', 'ID', contract_id, updates):
+                             output = f"✅ Контракт ID:{contract_id} назначен отряду(ам): {squads_str}.\n"
+                             log_terminal_event("syndicate_action", user_info, f"Назначил контракт {contract_id} на {squads_str}")
+                        else:
+                            output = "❌ Ошибка обновления контракта в Google Sheets.\n"
+                    else:
+                        output = f"❌ Контракт с ID '{contract_id}' не найден.\n"
+            except ValueError:
+                output = "❌ ID контракта должен быть числом.\n"
+        
+    elif base_command == "view_my_requests" and current_role == "client":
+        output = "--- ✉️ ВАШИ ЗАПРОСЫ ---\n"
+        load_data_from_sheets() 
+        found_requests = False
+        for req in PENDING_REQUESTS:
+            if req.get('UID Клиента') == session['uid']:
+                output += (f"  ID: {req.get('ID Запроса', 'N/A')}, Статус: {req.get('Статус', 'N/A')},\n"
+                           f"  Текст: {req.get('Текст Запроса', 'N/A')}\n")
+                found_requests = True
+        if not found_requests: output += "  У вас пока нет запросов.\n"
+        output += "-----------------------\n"
+
+    elif base_command == "viewrequests" and current_role == "syndicate":
+        output = "--- ✉️ ЗАПРОСЫ КЛИЕНТОВ (ОЖИДАЮЩИЕ) ---\n"
+        load_data_from_sheets() 
+        found_requests = False
+        for req in PENDING_REQUESTS:
+            if req.get('Статус', '').lower() == 'новый':
+                output += (f"  ID: {req.get('ID Запроса', 'N/A')}, От: {req.get('Позывной Клиента', 'N/A')} (UID: {req.get('UID Клиента', 'N/A')}),\n"
+                           f"  Текст: {req.get('Текст Запроса', 'N/A')}\n")
+                found_requests = True
+        if not found_requests: output += "  Нет ожидающих запросов.\n"
+        output += "--------------------------------------\n"
+
+    elif base_command == "acceptrequest" and current_role == "syndicate":
+        req_parts = args.split(" ", 3)
+        if len(req_parts) < 4:
+            output = "ℹ️ Использование: acceptrequest <ID_запроса> <название_контракта> <описание> <награда>\n"
+        else:
+            try:
+                request_id = int(req_parts[0])
+                contract_title, contract_description, contract_reward = req_parts[1], req_parts[2], req_parts[3]
+                load_data_from_sheets() 
+                target_request = next((r for r in PENDING_REQUESTS if r.get('ID Запроса') == request_id), None)
+                if not target_request:
+                    output = f"❌ Ошибка: Запрос с ID '{request_id}' не найден.\n"
+                elif target_request.get('Статус', '').lower() != 'новый':
+                    output = f"❌ Ошибка: Запрос с ID '{request_id}' уже был обработан.\n"
+                else:
+                    if google_sheets_api.update_row_by_key('Запросы Клиентов', 'ID Запроса', request_id, {'Статус': 'Принят'}):
+                        valid_c_ids = [c['ID'] for c in CONTRACTS if isinstance(c.get('ID'), int)]
+                        next_contract_id = max(valid_c_ids) + 1 if valid_c_ids else 1
+                        contract_data_row = [next_contract_id, contract_title, contract_description, contract_reward, 'active', 'None']
+                        if google_sheets_api.append_row('Контракты', contract_data_row):
+                            target_request['Статус'] = 'Принят'
+                            CONTRACTS.append({"ID": next_contract_id, "Название": contract_title, "Описание": contract_description, "Награда": contract_reward, "Статус": "active", "Назначено": "None"})
+                            output = (f"✅ Запрос ID:{request_id} принят. Создан контракт (ID: {next_contract_id}) '{contract_title}'.\n")
+                            log_terminal_event("syndicate_action", user_info, f"Принят запрос ID:{request_id}, создан контракт ID:{next_contract_id}.")
+                            client_sid = next((sid for sid, data in active_users.items() if data.get('uid') == target_request.get('UID Клиента')), None)
+                            if client_sid:
+                                socketio.emit('terminal_output', {'output': f"🔔 Ваш запрос (ID: {request_id}) был ПРИНЯТ Синдикатом!\n"}, room=client_sid)
+                        else:
+                            google_sheets_api.update_row_by_key('Запросы Клиентов', 'ID Запроса', request_id, {'Статус': 'Новый'})
+                            output = "❌ Ошибка: Не удалось создать контракт в Google Таблицах.\n"
+                    else:
+                        output = "❌ Ошибка: Не удалось обновить статус запроса в Google Таблицах.\n"
+            except ValueError:
+                output = "❌ Ошибка: ID запроса должен быть числом.\n"
+                emit('terminal_output', {'output': output})
+                return
+
+    elif base_command == "declinerequest" and current_role == "syndicate":
+        parts = args.split(" ")
+        if not parts or not parts[0]:
+            output = "ℹ️ Использование: declinerequest <ID_запроса>\n"
+        else:
+            try:
+                request_id = int(parts[0])
+                load_data_from_sheets() 
+                target_request = next((r for r in PENDING_REQUESTS if r.get('ID Запроса') == request_id), None)
+                if not target_request:
+                    output = f"❌ Ошибка: Запрос с ID '{request_id}' не найден.\n"
+                elif target_request.get('Статус', '').lower() != 'новый':
+                    output = f"❌ Ошибка: Запрос с ID '{request_id}' уже был обработан.\n"
+                else:
+                    if google_sheets_api.update_row_by_key('Запросы Клиентов', 'ID Запроса', request_id, {'Статус': 'Отклонен'}):
+                        target_request['Статус'] = 'Отклонен'
+                        output = f"✅ Запрос ID:{request_id} отклонен.\n"
+                        log_terminal_event("syndicate_action", user_info, f"Отклонен запрос ID:{request_id}.")
+                        client_sid = next((sid for sid, data in active_users.items() if data.get('uid') == target_request.get('UID Клиента')), None)
+                        if client_sid:
+                            socketio.emit('terminal_output', {'output': f"🔔 Ваш запрос (ID: {request_id}) был ОТКЛОНЕН Синдикатом!\n"}, room=client_sid)
+                    else:
+                        output = "❌ Ошибка: Не удалось отклонить запрос в Google Таблицах.\n"
+            except ValueError:
+                output = "❌ Ошибка: ID запроса должен быть числом.\n"
+                emit('terminal_output', {'output': output})
+                return
+    else:
+        output = (f"❓ Неизвестная команда: '{base_command}' или недоступна для вашей роли ({current_role}).\n"
+                  "Введите 'help' для списка команд.\n")
+
+    emit('terminal_output', {'output': output + '\n'}, room=request.sid)
+
+if __name__ == '__main__':
+    print("Запуск в режиме локальной отладки...")
+    socketio.run(app, debug=True, allow_unsafe_werkzeug=True, host='0.0.0.0', port=5000)
