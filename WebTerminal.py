@@ -138,83 +138,6 @@ app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_very_temporary_
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
 socketio = SocketIO(app)
 
-
-# --- [SECURITY INJECT BEGIN] ---
-import secrets, time
-try:
-    import bleach  # may not be installed on server, but expected
-except Exception:
-    bleach = None
-from datetime import timedelta
-from functools import wraps
-from flask import session, request
-from flask_socketio import emit, disconnect
-
-# Force secure cookies and mandatory secret
-if not app.config.get("SECRET_KEY"):
-    _sk = os.environ.get("FLASK_SECRET_KEY")
-    if not _sk:
-        raise RuntimeError("FLASK_SECRET_KEY is required")
-    app.config["SECRET_KEY"] = _sk
-app.config['SESSION_COOKIE_HTTPONLY'] = True
-app.config['SESSION_COOKIE_SECURE'] = True
-app.config['SESSION_COOKIE_SAMESITE'] = 'Strict'
-app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=7)
-
-# Rate limiting
-_MAX_LOGIN_ATTEMPTS = 5
-_LOGIN_WINDOW = 900
-_login_attempts = {}
-_msg_timestamps = {}
-
-def _rate_limit(ip, limit=_MAX_LOGIN_ATTEMPTS, window=_LOGIN_WINDOW):
-    now = time.time()
-    _login_attempts.setdefault(ip, [])
-    _login_attempts[ip] = [t for t in _login_attempts[ip] if now - t < window]
-    if len(_login_attempts[ip]) >= limit:
-        return False
-    _login_attempts[ip].append(now)
-    return True
-
-def _msg_rate(uid, min_interval=0.5):
-    now = time.time()
-    last = _msg_timestamps.get(uid, 0)
-    if now - last < min_interval:
-        return False
-    _msg_timestamps[uid] = now
-    return True
-
-def _sanitize(x):
-    if bleach is None:
-        return str(x)
-    try:
-        return bleach.clean(str(x), tags=[], attributes={}, strip=True)
-    except Exception:
-        return str(x)
-
-def _generate_csrf():
-    token = secrets.token_hex(16)
-    session['csrf_token'] = token
-    return token
-
-def _check_csrf_from(data):
-    token = None
-    if isinstance(data, dict):
-        token = data.get('csrf')
-    if not token:
-        token = request.args.get('csrf') or request.headers.get('X-CSRF-Token')
-    return bool(token) and token == session.get('csrf_token')
-
-def require_auth(f):
-    @wraps(f)
-    def _inner(*args, **kwargs):
-        if not session.get('uid') or session.get('role') in (None, 'guest'):
-            emit('terminal_output', {'output': '❌ Требуется авторизация.\n'})
-            disconnect()
-            return
-        return f(*args, **kwargs)
-    return _inner
-# --- [SECURITY INJECT END] ---
 if not google_sheets_api.init_google_sheets():
     print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать Google Таблицы.")
 load_access_keys()
@@ -226,9 +149,6 @@ def index():
 
 @socketio.on('connect')
 def handle_connect():
-    # ИСПРАВЛЕНО: Убрана синтаксическая ошибка со склеенными строками
-    token = _generate_csrf()
-    emit('csrf_token', {'token': token})
     session['role'] = 'guest'
     session['uid'] = None
     session['callsign'] = None
@@ -239,8 +159,6 @@ def handle_connect():
 
 @socketio.on('disconnect')
 def handle_disconnect():
-    # ИСПРАВЛЕНО: Убрана ненужная и вызывающая ошибку проверка CSRF при отключении.
-    # Клиент не отправляет токен при закрытии вкладки.
     uid_disconnected = session.get('uid', 'N/A')
     callsign_disconnected = session.get('callsign', 'N/A')
     if request.sid in active_operatives:
@@ -251,11 +169,6 @@ def handle_disconnect():
 
 @socketio.on('login')
 def login(data):
-    # --- CSRF check (auto) ---
-    if not _check_csrf_from(data):
-        emit('terminal_output', {'output': '❌ Неверный CSRF-токен. Перезагрузите страницу.\n'})
-        disconnect()
-        return
     uid = str(data.get('uid'))
     key = data.get('key')
     user_info = f"UID: {uid}, Key: {key}"
@@ -289,11 +202,6 @@ def login(data):
 
 @socketio.on('terminal_input')
 def handle_terminal_input(data):
-    # --- CSRF check (auto) ---
-    if not _check_csrf_from(data):
-        emit('terminal_output', {'output': '❌ Неверный CSRF-токен. Перезагрузите страницу.\n'})
-        disconnect()
-        return
     global ROLE_PERMISSIONS, COMMAND_DESCRIPTIONS, SQUAD_FREQUENCIES, ACCESS_KEYS, KEY_TO_ROLE
 
     command = data.get('command', '').strip()
