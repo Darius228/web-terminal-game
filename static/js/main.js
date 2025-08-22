@@ -1,152 +1,288 @@
-// === main_secure.js ===
-// Обновлённая версия твоего старого main.js
-// Сохранена вся логика экранов и логина, добавлена защита и улучшена стабильность.
+// main.js
 
-console.log("[INIT] WebTerminal main_secure.js loaded");
+const terminalOutput = document.getElementById('terminal-output');
+const terminalInput = document.getElementById('terminal-input');
+const prompt = '$ ';
+const TYPING_SPEED = 10;
+let isTyping = false;
+let commandHistory = [];
+let historyIndex = -1;
+const toggleSoundButton = document.getElementById('toggle-sound');
+const rebootSystemButton = document.getElementById('reboot-system');
+const connectionStatusIndicator = document.getElementById('connection-status');
+const systemTimeElement = document.getElementById('system-time');
+const uptimeElement = document.getElementById('uptime');
+const channelFrequencyElement = document.getElementById('channel-frequency');
+const networkPingElement = document.getElementById('network-ping');
+const uiBottomPanel = document.getElementById('ui-bottom-panel');
+const loadingScreen = document.getElementById('loading-screen');
+const mainTerminalContainer = document.getElementById('main-terminal-container');
+const initialLoadingBar = document.getElementById('initial-loading-bar');
+const alphaFreqLine = document.getElementById('alpha-freq-line');
+const betaFreqLine = document.getElementById('beta-freq-line');
+const alphaFrequencyElement = document.getElementById('alpha-frequency');
+const betaFrequencyElement = document.getElementById('beta-frequency');
+let soundEnabled = true;
+let uptimeSeconds = 0;
+let currentPing = '--';
+let pingIntervalId = null;
+const socket = io();
+const keyPressSounds = [new Audio('/static/audio/key_press_1.mp3'), new Audio('/static/audio/key_press_2.mp3'), new Audio('/static/audio/key_press_3.mp3')];
+const enterSounds = [new Audio('/static/audio/enter_1.mp3'), new Audio('/static/audio/enter_2.mp3'), new Audio('/static/audio/enter_3.mp3'), ];
+const commandDoneSound = new Audio('/static/audio/command_done.mp3');
+const commandPlugins = {};
 
-// === Инициализация Socket.IO ===
-const socket = io({
-    transports: ["websocket"],
-    reconnection: true,
-    reconnectionAttempts: 5,
-    reconnectionDelay: 1000
+function playRandomSound(audioArray) {
+    if (!soundEnabled || audioArray.length === 0) return;
+    const sound = audioArray[Math.floor(Math.random() * audioArray.length)];
+    sound.currentTime = 0;
+    sound.volume = 0.6;
+    sound.play().catch(e => {});
+}
+
+function playSingleSound(audioElement) {
+    if (!soundEnabled || !audioElement) return;
+    audioElement.currentTime = 0;
+    audioElement.volume = 0.7;
+    audioElement.play().catch(e => {});
+}
+
+function registerCommand(name, handler) {
+    commandPlugins[name.toLowerCase()] = handler;
+}
+
+registerCommand('clear', function() {
+    terminalOutput.value = '';
+    displayOutput(prompt, false, true);
+    playSingleSound(commandDoneSound);
 });
 
-let csrfToken = null;
+function initializeTerminalDisplay() {
+    displayOutput("Инициализация Терминала...\nСвязь установлена.\nДоступ ограничен. Введите 'login <UID> <ключ>'\nДля списка команд введите 'help'\n" + prompt, false, true);
+    terminalInput.focus();
+}
 
-// === Логирование всех входящих событий ===
-const _onevent = socket.onevent;
-socket.onevent = function (packet) {
-    const args = packet.data || [];
-    console.log("[SOCKET EVENT]", args[0], args[1] || "");
-    _onevent.call(this, packet);
-};
+function loadDataFromLocalStorage() {
+    try {
+        const savedHistory = JSON.parse(localStorage.getItem('stalker_terminal_commandHistory'));
+        const savedOutput = localStorage.getItem('stalker_terminal_terminalOutput');
+        const savedSound = JSON.parse(localStorage.getItem('stalker_terminal_soundEnabled'));
+        if (Array.isArray(savedHistory)) {
+            commandHistory = savedHistory;
+        }
+        if (typeof savedSound === 'boolean') {
+            soundEnabled = savedSound;
+            if (toggleSoundButton) {
+                toggleSoundButton.textContent = `ЗВУК: ${soundEnabled ? 'ВКЛ' : 'ВЫКЛ'}`;
+            }
+        }
+        if (typeof savedOutput === 'string' && savedOutput.trim() !== '') {
+            terminalOutput.value = savedOutput;
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            return true;
+        }
+    } catch (e) {}
+    return false;
+}
 
-// === Автоматическая вставка CSRF-токена ===
-const _origEmit = socket.emit.bind(socket);
-socket.emit = function (event, ...args) {
-    if (csrfToken) {
-        if (args.length === 0) {
-            args = [{ csrf: csrfToken }];
-        } else if (typeof args[0] === "object" && args[0] !== null) {
-            args[0] = Object.assign({}, args[0], { csrf: csrfToken });
-        } else {
-            args.unshift({ csrf: csrfToken });
+document.addEventListener('DOMContentLoaded', (event) => {
+    let wasOutputLoaded = false;
+    wasOutputLoaded = loadDataFromLocalStorage();
+
+    mainTerminalContainer.classList.add('hidden');
+    uiBottomPanel.classList.add('hidden');
+    loadingScreen.classList.remove('hidden');
+    initialLoadingBar.style.width = '0%';
+
+    let progress = 0;
+    const loadingInterval = setInterval(() => {
+        progress += 10;
+        if (progress > 100) progress = 100;
+        initialLoadingBar.style.width = `${progress}%`;
+        if (progress >= 100) {
+            clearInterval(loadingInterval);
+            setTimeout(() => {
+                loadingScreen.classList.add('hidden');
+                mainTerminalContainer.classList.remove('hidden');
+                if (wasOutputLoaded) {
+                    terminalInput.focus();
+                } else {
+                    initializeTerminalDisplay();
+                }
+            }, 300);
+        }
+    }, 80);
+
+    updateSystemTimeAndUptime();
+    setInterval(updateSystemTimeAndUptime, 1000);
+    startPingMeasurement();
+
+    if (toggleSoundButton) {
+        toggleSoundButton.addEventListener('click', () => {
+            soundEnabled = !soundEnabled;
+            toggleSoundButton.textContent = `ЗВУК: ${soundEnabled ? 'ВКЛ' : 'ВЫКЛ'}`;
+            saveDataToLocalStorage();
+        });
+    }
+
+    if (rebootSystemButton) {
+        rebootSystemButton.addEventListener('click', () => {
+            localStorage.removeItem('stalker_terminal_terminalOutput');
+            window.location.reload();
+        });
+    }
+});
+
+terminalInput.addEventListener('keydown', function(event) {
+    if (event.key.length === 1 && !event.ctrlKey && !event.altKey && !event.metaKey) {
+        playRandomSound(keyPressSounds);
+    }
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        playRandomSound(enterSounds);
+        if (!isTyping) {
+            processCommand();
+        }
+    } else if (event.key === 'ArrowUp') {
+        event.preventDefault();
+        if (commandHistory.length > 0) {
+            if (historyIndex < commandHistory.length - 1) {
+                historyIndex++;
+            }
+            terminalInput.value = commandHistory[historyIndex];
+            setTimeout(() => terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length, 0);
+        }
+    } else if (event.key === 'ArrowDown') {
+        event.preventDefault();
+        if (historyIndex > -1) {
+            historyIndex--;
+            terminalInput.value = historyIndex === -1 ? '' : commandHistory[historyIndex];
+            setTimeout(() => terminalInput.selectionStart = terminalInput.selectionEnd = terminalInput.value.length, 0);
         }
     }
-    return _origEmit(event, ...args);
-};
-
-// === Получение CSRF-токена ===
-socket.on("csrf_token", (data) => {
-    csrfToken = data.token;
-    console.log("[CSRF] token received:", csrfToken);
 });
 
-// === Экран инициализации ===
-const loadingScreen = document.querySelector("#loading-screen"); // Исправлено на "-screen"
-const loginScreen = document.querySelector("#loginScreen");     // Оставляем как есть, но сейчас добавим HTML
-const uiPanel = document.querySelector("#main-terminal-container"); // Указываем на существующий контейнер терминала
-
-// === main.js ===
-// ЗАМЕНИТЕ СТАРЫЙ ОБРАБОТЧИК `update_ui_state` НА ЭТОТ
-
-socket.on("update_ui_state", (data) => {
-    console.log("[UI STATE]", data);
-
-    // Убедимся, что все элементы найдены, прежде чем что-то с ними делать
-    if (!loadingScreen || !loginScreen || !uiPanel) {
-        console.error("Один или несколько UI-элементов не найдены в HTML!");
+socket.on('terminal_output', function(data) {
+    if (data.output === "<CLEAR_TERMINAL>\n") {
+        terminalOutput.value = '';
+        displayOutput(prompt, false, true);
+        playSingleSound(commandDoneSound);
         return;
     }
+    displayOutput(data.output, true);
+    playSingleSound(commandDoneSound);
+});
 
-    if (data.show_ui_panel) {
-        // Показываем главный интерфейс
-        loadingScreen.classList.add("hidden");
-        loginScreen.classList.add("hidden");
-        uiPanel.classList.remove("hidden");
+socket.on('update_ui_state', function(data) {
+    const role = data.role;
+    const showUiPanel = data.show_ui_panel;
+    if (uiBottomPanel) {
+        uiBottomPanel.classList.toggle('hidden', !showUiPanel);
+    }
+    if (channelFrequencyElement && data.channel_frequency) {
+        channelFrequencyElement.textContent = data.channel_frequency;
+    }
+    if (role === 'syndicate' && data.squad_frequencies) {
+        alphaFrequencyElement.textContent = data.squad_frequencies.alpha || '--.-- МГц';
+        betaFrequencyElement.textContent = data.squad_frequencies.beta || '--.-- МГц';
+        alphaFreqLine.classList.remove('hidden');
+        betaFreqLine.classList.remove('hidden');
+        if (channelFrequencyElement) channelFrequencyElement.parentElement.classList.add('hidden');
     } else {
-        // Показываем экран логина
-        loadingScreen.classList.add("hidden");
-        uiPanel.classList.add("hidden");
-        loginScreen.classList.remove("hidden");
+        if (alphaFreqLine) alphaFreqLine.classList.add('hidden');
+        if (betaFreqLine) betaFreqLine.classList.add('hidden');
+        if (channelFrequencyElement) channelFrequencyElement.parentElement.classList.remove('hidden');
     }
 });
 
-// === Логирование подключения и ошибок ===
-socket.on("connect", () => {
-    console.log("[SOCKET] Connected to server");
+socket.on('pong_response', function() {
+    currentPing = Date.now() - window.pingStartTime;
+    if (networkPingElement) {
+        networkPingElement.textContent = `${currentPing}мс`;
+    }
 });
 
-socket.on("disconnect", (reason) => {
-    console.warn("[SOCKET] Disconnected:", reason);
-});
+function startPingMeasurement() {
+    if (pingIntervalId) clearInterval(pingIntervalId);
+    pingIntervalId = setInterval(() => {
+        window.pingStartTime = Date.now();
+        socket.emit('ping_check');
+    }, 3000);
+}
 
-socket.on("connect_error", (err) => {
-    console.error("[SOCKET] Connection error:", err);
-});
+function processCommand() {
+    let fullCommand = terminalInput.value.trim();
+    if (fullCommand === '') {
+        displayOutput(prompt, false, true);
+        terminalInput.value = '';
+        return;
+    }
+    if (commandHistory[0] !== fullCommand) {
+        commandHistory.unshift(fullCommand);
+        saveDataToLocalStorage();
+    }
+    historyIndex = -1;
+    displayOutput(prompt + fullCommand + '\n', false, true);
+    const cmdName = fullCommand.split(' ')[0].toLowerCase();
+    if (commandPlugins[cmdName]) {
+        commandPlugins[cmdName](fullCommand.split(' ').slice(1));
+        terminalInput.value = '';
+    } else {
+        socket.emit('terminal_input', {
+            command: fullCommand
+        });
+        terminalInput.value = '';
+    }
+}
 
-// === Сообщения терминала ===
-socket.on("terminal_output", (data) => {
-    if (data && data.output) {
-        const terminal = document.querySelector("#terminalOutput");
-        if (terminal) {
-            terminal.value += data.output;
-            terminal.scrollTop = terminal.scrollHeight;
+function displayOutput(text, addNewLine, isInstant = false) {
+    if (isTyping && !isInstant) return;
+    if (isInstant) {
+        terminalOutput.value += text;
+        if (addNewLine && !text.endsWith('\n')) {
+            terminalOutput.value += '\n';
+        }
+        terminalOutput.scrollTop = terminalOutput.scrollHeight;
+        terminalInput.focus();
+        saveDataToLocalStorage();
+        return;
+    }
+    isTyping = true;
+    let i = 0;
+    function typeChar() {
+        if (i < text.length) {
+            terminalOutput.value += text.charAt(i++);
+            terminalOutput.scrollTop = terminalOutput.scrollHeight;
+            setTimeout(typeChar, TYPING_SPEED);
+        } else {
+            if (addNewLine && !text.endsWith('\n')) {
+                terminalOutput.value += '\n';
+            }
+            isTyping = false;
+            displayOutput(prompt, false, true);
+            terminalInput.focus();
         }
     }
-});
+    typeChar();
+}
 
-// === Форма логина ===
-document.addEventListener("DOMContentLoaded", () => {
-    console.log("[INIT] DOM fully loaded");
+function updateSystemTimeAndUptime() {
+    const now = new Date();
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    if (systemTimeElement) systemTimeElement.textContent = `${hours}:${minutes}:${seconds}`;
+    uptimeSeconds++;
+    const uptHours = String(Math.floor(uptimeSeconds / 3600)).padStart(2, '0');
+    const uptMinutes = String(Math.floor((uptimeSeconds % 3600) / 60)).padStart(2, '0');
+    const uptSeconds = String(uptimeSeconds % 60).padStart(2, '0');
+    if (uptimeElement) uptimeElement.textContent = `${uptHours}:${uptMinutes}:${uptSeconds}`;
+}
 
-    const uidInput = document.querySelector("#uidInput");
-    const keyInput = document.querySelector("#keyInput");
-    const loginBtn = document.querySelector("#loginBtn");
-
-    if (loginBtn) {
-        loginBtn.addEventListener("click", () => {
-            const uid = uidInput.value.trim();
-            const key = keyInput.value.trim();
-
-            if (uid.length === 0 || key.length === 0) {
-                alert("Введите UID и Ключ доступа");
-                return;
-            }
-
-            console.log("[LOGIN] Attempting login:", uid);
-            socket.emit("login", { uid, key });
-        });
-    }
-
-    keyInput?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            loginBtn.click();
-        }
-    });
-});
-
-// === Отправка команд ===
-document.addEventListener("DOMContentLoaded", () => {
-    const inputField = document.querySelector("#commandInput");
-    const sendBtn = document.querySelector("#sendBtn");
-
-    if (sendBtn && inputField) {
-        sendBtn.addEventListener("click", () => {
-            const command = inputField.value.trim();
-            if (command.length > 0) {
-                console.log("[COMMAND] Sending:", command);
-                socket.emit("sendmsg", { message: command });
-                inputField.value = "";
-            }
-        });
-
-        inputField.addEventListener("keydown", (e) => {
-            if (e.key === "Enter") {
-                e.preventDefault();
-                sendBtn.click();
-            }
-        });
-    }
-});
+function saveDataToLocalStorage() {
+    try {
+        localStorage.setItem('stalker_terminal_commandHistory', JSON.stringify(commandHistory));
+        localStorage.setItem('stalker_terminal_terminalOutput', terminalOutput.value);
+        localStorage.setItem('stalker_terminal_soundEnabled', JSON.stringify(soundEnabled));
+    } catch (e) {}
+}
