@@ -44,9 +44,9 @@ socket.on("csrf_token", (data) => {
 });
 
 // === Экран инициализации ===
-const loadingScreen = document.querySelector("#loadingScreen");
-const loginScreen = document.querySelector("#loginScreen");
-const uiPanel = document.querySelector("#uiPanel");
+const loadingScreen = document.querySelector("#loading-screen"); // Исправлено на "-screen"
+const loginScreen = document.querySelector("#loginScreen");     // Оставляем как есть, но сейчас добавим HTML
+const uiPanel = document.querySelector("#main-terminal-container"); // Указываем на существующий контейнер терминала
 
 // === Обновление UI в зависимости от состояния ===
 socket.on("update_ui_state", (data) => {

@@ -14,6 +14,21 @@
             <div id="initial-loading-bar" class="loading-bar"></div>
         </div>
     </div>
+	
+	<div id="loading-screen" class="loading-screen">
+        </div>
+
+    <div id="loginScreen" class="login-screen hidden">
+        <div class="login-box">
+            <div class="login-title">ТРЕБУЕТСЯ АУТЕНТИФИКАЦИЯ</div>
+            <input type="text" id="uidInput" class="login-input" placeholder="UID">
+            <input type="password" id="keyInput" class="login-input" placeholder="КЛЮЧ ДОСТУПА">
+            <button id="loginBtn" class="login-button">ВОЙТИ</button>
+        </div>
+    </div>
+	
+    <div id="main-terminal-container" class="terminal-container hidden">
+        </div>
 
     <div id="main-terminal-container" class="terminal-container hidden"> 
         <textarea id="terminal-output" readonly></textarea>
