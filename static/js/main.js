@@ -48,17 +48,28 @@ const loadingScreen = document.querySelector("#loading-screen"); // Исправ
 const loginScreen = document.querySelector("#loginScreen");     // Оставляем как есть, но сейчас добавим HTML
 const uiPanel = document.querySelector("#main-terminal-container"); // Указываем на существующий контейнер терминала
 
-// === Обновление UI в зависимости от состояния ===
+// === main.js ===
+// ЗАМЕНИТЕ СТАРЫЙ ОБРАБОТЧИК `update_ui_state` НА ЭТОТ
+
 socket.on("update_ui_state", (data) => {
     console.log("[UI STATE]", data);
+
+    // Убедимся, что все элементы найдены, прежде чем что-то с ними делать
+    if (!loadingScreen || !loginScreen || !uiPanel) {
+        console.error("Один или несколько UI-элементов не найдены в HTML!");
+        return;
+    }
+
     if (data.show_ui_panel) {
-        if (loadingScreen) loadingScreen.style.display = "none";
-        if (loginScreen) loginScreen.style.display = "none";
-        if (uiPanel) uiPanel.style.display = "block";
+        // Показываем главный интерфейс
+        loadingScreen.classList.add("hidden");
+        loginScreen.classList.add("hidden");
+        uiPanel.classList.remove("hidden");
     } else {
-        if (uiPanel) uiPanel.style.display = "none";
-        if (loadingScreen) loadingScreen.style.display = "none";
-        if (loginScreen) loginScreen.style.display = "flex";
+        // Показываем экран логина
+        loadingScreen.classList.add("hidden");
+        uiPanel.classList.add("hidden");
+        loginScreen.classList.remove("hidden");
     }
 });
 
