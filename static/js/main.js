@@ -1,89 +1,110 @@
-// main_secure.js
-// Клиентская часть с автоматической CSRF и безопасной отправкой событий.
-// Сохраняет твою логику, просто прокладывает «прокси-слой» вокруг socket.emit.
+console.log("[INIT] WebTerminal main_secure.js loaded");
 
-(function(){
-  const socket = io({
+// --- Инициализация Socket.IO ---
+const socket = io({
     transports: ["websocket"],
     reconnection: true,
-    reconnectionAttempts: 10,
-    reconnectionDelay: 1000,
-  });
+    reconnectionAttempts: 5,
+    reconnectionDelay: 1000
+});
 
-  window.socket = socket;
+let csrfToken = null;
 
-  let csrfToken = null;
+// --- Логирование всех событий Socket.IO ---
+const _onevent = socket.onevent;
+socket.onevent = function(packet) {
+    const args = packet.data || [];
+    console.log("[SOCKET EVENT]", args[0], args[1] || "");
+    _onevent.call(this, packet);
+};
 
-  socket.on("csrf_token", (data) => {
-    csrfToken = data && data.token;
-    console.log("[CSRF] token received:", csrfToken);
-  });
-
-  // Обёртка: вставляет csrf в первый аргумент (если объект), либо подставляет новый объект
-  const originalEmit = socket.emit.bind(socket);
-  socket.emit = function(event, ...args) {
-    // Пропускаем системные события, но они у нас и не вызываются вручную
-    if (event !== "connect" && event !== "disconnect") {
-      if (!csrfToken) {
-        console.warn("[CSRF] token not ready for event:", event);
-      }
-      if (args.length === 0) {
-        args = [ { csrf: csrfToken } ];
-      } else if (typeof args[0] === "object" && args[0] !== null && !Array.isArray(args[0])) {
-        args[0] = Object.assign({}, args[0], { csrf: csrfToken });
-      } else {
-        args.unshift({ csrf: csrfToken });
-      }
+// --- Автоматическая вставка CSRF-токена ---
+const _origEmit = socket.emit.bind(socket);
+socket.emit = function(event, ...args) {
+    if (!csrfToken) {
+        console.warn("[CSRF] Токен не получен, отправляем без него:", event);
     }
-    return originalEmit(event, ...args);
-  };
+    if (args.length === 0) {
+        args = [ { csrf: csrfToken } ];
+    } else if (typeof args[0] === "object" && args[0] !== null && !Array.isArray(args[0])) {
+        args[0] = Object.assign({}, args[0], { csrf: csrfToken });
+    } else {
+        args.unshift({ csrf: csrfToken });
+    }
+    console.log("[SOCKET EMIT]", event, args[0]);
+    return _origEmit(event, ...args);
+};
 
-  // ---------------- UI-хуки (оставь под свою разметку) ----------------
-  const term = document.querySelector("#terminalOutput");
-  function printLine(s){
-    if (!term) return;
-    term.value += s;
-    term.scrollTop = term.scrollHeight;
-  }
+// --- Получение CSRF-токена ---
+socket.on("csrf_token", (data) => {
+    csrfToken = data.token;
+    console.log("[CSRF] token received:", csrfToken);
+});
 
-  socket.on("terminal_output", (data) => {
-    if (data && data.output) printLine(data.output);
-  });
+// --- Обновление UI по роли ---
+socket.on("update_ui_state", (data) => {
+    console.log("[UI STATE]", data);
 
-  socket.on("update_ui_state", (data) => {
-    const panel = document.querySelector("#uiPanel");
-    if (panel) panel.style.display = data.show_ui_panel ? "block" : "none";
-  });
+    const loadingScreen = document.querySelector("#loadingScreen");
+    const uiPanel = document.querySelector("#uiPanel");
 
-  socket.on("connect_error", (err) => {
-    console.error("connect_error:", err && err.message);
-  });
+    if (data.show_ui_panel) {
+        if (loadingScreen) loadingScreen.style.display = "none";
+        if (uiPanel) uiPanel.style.display = "block";
+    } else {
+        if (uiPanel) uiPanel.style.display = "none";
+        if (loadingScreen) loadingScreen.style.display = "flex";
+    }
+});
 
-  socket.on("disconnect", () => {
-    console.warn("socket disconnected");
-  });
+// --- Логирование подключения и ошибок ---
+socket.on("connect", () => {
+    console.log("[SOCKET] Connected to server");
+});
 
-  // Пример: кнопка отправки сообщения
-  const sendBtn = document.querySelector("#sendMessage");
-  const msgInput = document.querySelector("#messageInput");
-  if (sendBtn && msgInput) {
-    sendBtn.addEventListener("click", () => {
-      const msg = (msgInput.value || "").trim();
-      if (msg) {
-        socket.emit("sendmsg", { message: msg });
-        msgInput.value = "";
-      }
-    });
-  }
+socket.on("disconnect", (reason) => {
+    console.warn("[SOCKET] Disconnected:", reason);
+});
 
-  // Пример: форма логина
-  const loginForm = document.querySelector("#loginForm");
-  if (loginForm) {
-    loginForm.addEventListener("submit", (e) => {
-      e.preventDefault();
-      const uid = loginForm.querySelector("[name=uid]").value.trim();
-      const key = loginForm.querySelector("[name=key]").value.trim();
-      socket.emit("login", { uid, key });
-    });
-  }
-})();
+socket.on("connect_error", (err) => {
+    console.error("[SOCKET] Connection error:", err);
+});
+
+// --- Вывод сообщений в терминал ---
+socket.on("terminal_output", (data) => {
+    if (data && data.output) {
+        const terminal = document.querySelector("#terminalOutput");
+        if (terminal) {
+            terminal.value += data.output;
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+    }
+});
+
+// --- Обработка кнопок и команд ---
+document.addEventListener("DOMContentLoaded", () => {
+    console.log("[INIT] DOM fully loaded");
+
+    const inputField = document.querySelector("#commandInput");
+    const sendBtn = document.querySelector("#sendBtn");
+
+    if (sendBtn && inputField) {
+        sendBtn.addEventListener("click", () => {
+            const command = inputField.value.trim();
+            if (command.length > 0) {
+                console.log("[COMMAND] Sending:", command);
+                socket.emit("sendmsg", { message: command });
+                inputField.value = "";
+            }
+        });
+    }
+
+    if (inputField) {
+        inputField.addEventListener("keydown", (e) => {
+            if (e.key === "Enter") {
+                e.preventDefault();
+                sendBtn.click();
+            }
+        });
+    }
+});
