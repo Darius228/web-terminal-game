@@ -68,7 +68,7 @@ app.config["SESSION_COOKIE_SECURE"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=7)
 
-socketio = SocketIO(app, cors_allowed_origins=[], logger=False, engineio_logger=False)
+socketio = SocketIO(app, cors_allowed_origins="*", logger=False, engineio_logger=False)
 
 # =========================
 # Утилиты безопасности
